@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Labels BIP-329 de muchas billeteras: merge, búsqueda y origen de UTXOs.
+"""BIP-329 labels from many wallets: merge, search and UTXO origin.
 
   btclabels.py merge [-l DIR] -o master.jsonl
-  btclabels.py find  [-l DIR] TEXTO
-  btclabels.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
-  btclabels.py report [-l DIR] [-s host:puerto] [-o utxos.html]
+  btclabels.py find  [-l DIR] TEXT
+  btclabels.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
+  btclabels.py report [-l DIR] [-s host:port] [-o utxos.html]
 
--l (repetible) es un archivo o un directorio; por defecto, el directorio
-actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
-viejos de Electrum (.json, objeto {txid|dirección: label}). El nombre del
-archivo, sin "-labels", es el nombre de la billetera.
+-l (repeatable) is a file or a directory; by default, the current
+directory. BIP-329 exports (.jsonl: Sparrow and others) and old Electrum
+exports (.json, object {txid|address: label}) are accepted. The file
+name, without "-labels", is the wallet name.
 
-REF es txid:vout, un txid (todas sus salidas) o una dirección (sus UTXOs
-actuales). trace consulta un servidor Electrum propio (Fulcrum, electrs) y
-recorre las entradas hacia atrás por tus outputs hasta llegar a lo externo:
-por dónde entró la plata. report hace eso para todos los UTXOs vivos de los
-exports y arma un HTML con índice y un grafo por UTXO.
-Solo stdlib.
+REF is txid:vout, a txid (all its outputs) or an address (its current
+UTXOs). trace queries your own Electrum server (Fulcrum, electrs) and
+walks the inputs backwards through your outputs until it reaches external
+ones: where the coins came in. report does that for every live UTXO in
+the exports and builds an HTML page with an index and a graph per UTXO.
+
+--lang en|es|ca (or $BTCLABELS_LANG) picks the language of messages and
+of the report; English by default.
+Stdlib only.
 """
 import argparse
 import hashlib
@@ -34,7 +37,249 @@ KEYS = ("tx", "addr", "output", "input", "pubkey", "xpub")
 HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 OUTREF = re.compile(r"^[0-9a-fA-F]{64}:\d+$")
 
-# ------------------------------------------------------------- lectura
+# ---------------------------------------------------------------- i18n
+
+LANGS = ("en", "es", "ca")
+LANG = "en"
+
+DOC_ES = """\
+Labels BIP-329 de muchas billeteras: merge, búsqueda y origen de UTXOs.
+
+  btclabels.py merge [-l DIR] -o master.jsonl
+  btclabels.py find  [-l DIR] TEXTO
+  btclabels.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
+  btclabels.py report [-l DIR] [-s host:puerto] [-o utxos.html]
+
+-l (repetible) es un archivo o un directorio; por defecto, el directorio
+actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
+viejos de Electrum (.json, objeto {txid|dirección: label}). El nombre del
+archivo, sin "-labels", es el nombre de la billetera.
+
+REF es txid:vout, un txid (todas sus salidas) o una dirección (sus UTXOs
+actuales). trace consulta un servidor Electrum propio (Fulcrum, electrs) y
+recorre las entradas hacia atrás por tus outputs hasta llegar a lo externo:
+por dónde entró la plata. report hace eso para todos los UTXOs vivos de los
+exports y arma un HTML con índice y un grafo por UTXO.
+
+--lang en|es|ca (o $BTCLABELS_LANG) elige el idioma de los mensajes y del
+reporte; inglés por defecto.
+Solo stdlib.
+"""
+
+DOC_CA = """\
+Etiquetes BIP-329 de moltes carteres: fusió, cerca i origen d'UTXOs.
+
+  btclabels.py merge [-l DIR] -o master.jsonl
+  btclabels.py find  [-l DIR] TEXT
+  btclabels.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
+  btclabels.py report [-l DIR] [-s host:port] [-o utxos.html]
+
+-l (repetible) és un fitxer o un directori; per defecte, el directori
+actual. S'accepten exports BIP-329 (.jsonl: Sparrow i altres) i exports
+antics d'Electrum (.json, objecte {txid|adreça: etiqueta}). El nom del
+fitxer, sense "-labels", és el nom de la cartera.
+
+REF és txid:vout, un txid (totes les seves sortides) o una adreça (els seus
+UTXOs actuals). trace consulta un servidor Electrum propi (Fulcrum, electrs)
+i recorre les entrades cap enrere pels teus outputs fins arribar a l'extern:
+per on van entrar els diners. report ho fa per a tots els UTXOs vius dels
+exports i genera un HTML amb índex i un graf per UTXO.
+
+--lang en|es|ca (o $BTCLABELS_LANG) tria l'idioma dels missatges i de
+l'informe; anglès per defecte.
+Només stdlib.
+"""
+
+MSG = {
+    "en": {
+        "doc": __doc__,
+        # errors and progress
+        "no_files": "no label files found (.jsonl/.json)",
+        "bad_json": "{path}:{n}: invalid JSON: {err}",
+        "no_type_ref": "{path}:{n}: record without type/ref, skipped",
+        "conflict": "conflict {typ} {ref}: {a!r} + {b!r}",
+        "server_closed": "the server closed the connection",
+        "bad_b58": "invalid base58 checksum: {s}",
+        "bad_bech32": "invalid bech32 checksum: {s}",
+        "bad_addr": "unsupported address: {s}",
+        "no_utxos": "{ref}: no UTXOs",
+        "merged": "{n} records -> {out} ({c} conflicts)",
+        "graph_written": "graph -> {path} ({n} nodes)",
+        "live_utxos": "{n} live UTXOs in {w} wallets",
+        "report_written": "report -> {path}",
+        "no_dot": "warning: without Graphviz (dot) there are no graphs,"
+                  " text only",
+        # trace tree and graph
+        "seen": "(already seen)",
+        "external": "external",
+        "cut_depth": "... stopped at max depth ({n})",
+        "cut_nodes": "... stopped at max nodes ({n})",
+        "inputs": "inputs ({n}):",
+        # HTML report
+        "no_label": "(no label)",
+        "prev": "← previous",
+        "next": "next →",
+        "index": "index",
+        "index_title": "Index",
+        "text_tree": "text tree",
+        "lg_entry": "entry (received from outside)",
+        "lg_own_labeled": "own, labeled",
+        "lg_own": "own",
+        "th_wallet": "wallet",
+        "th_label": "label",
+        "th_entries": "entry points",
+        # CLI help
+        "mv_path": "PATH",
+        "mv_file": "FILE",
+        "h_lang": "language of messages and report: en, es, ca"
+                  " (default: $BTCLABELS_LANG or en)",
+        "h_labels": "file or directory (repeatable; default: .)",
+        "h_server": "Electrum server host:port"
+                    " (default: $BTCLABELS_SERVER or bitcoin.lan:50001)",
+        "h_ssl": "connect with TLS",
+        "h_insecure": "do not verify the certificate (self-signed Fulcrum)",
+        "h_max_depth": "maximum depth of the walk (default: 15)",
+        "h_max_nodes": "per UTXO in report, total in trace (default: 300)",
+        "h_all": "keep walking back through external outputs too",
+        "h_merge": "merge everything into a single BIP-329 file",
+        "h_out": "output file",
+        "h_quiet": "do not list every conflict",
+        "h_find": "search labels by text",
+        "h_text": "text to search for (case-insensitive)",
+        "h_trace": "trace the origin of UTXOs",
+        "h_dot": "also write the graph as Graphviz (.dot)",
+        "h_refs": "txid:vout, txid or address",
+        "h_report": "every live UTXO in one HTML file",
+        "h_no_graph": "text only, no Graphviz",
+    },
+    "es": {
+        "doc": DOC_ES,
+        "no_files": "no encontré archivos de labels (.jsonl/.json)",
+        "bad_json": "{path}:{n}: JSON inválido: {err}",
+        "no_type_ref": "{path}:{n}: registro sin type/ref, omitido",
+        "conflict": "conflicto {typ} {ref}: {a!r} + {b!r}",
+        "server_closed": "el servidor cerró la conexión",
+        "bad_b58": "checksum base58 inválido: {s}",
+        "bad_bech32": "checksum bech32 inválido: {s}",
+        "bad_addr": "dirección no soportada: {s}",
+        "no_utxos": "{ref}: sin UTXOs",
+        "merged": "{n} registros -> {out} ({c} conflictos)",
+        "graph_written": "grafo -> {path} ({n} nodos)",
+        "live_utxos": "{n} UTXOs vivos en {w} billeteras",
+        "report_written": "reporte -> {path}",
+        "no_dot": "aviso: sin Graphviz (dot) no hay grafos, solo texto",
+        "seen": "(ya visto)",
+        "external": "externo",
+        "cut_depth": "... corte por profundidad ({n})",
+        "cut_nodes": "... corte por cantidad de nodos ({n})",
+        "inputs": "entradas ({n}):",
+        "no_label": "(sin label)",
+        "prev": "← anterior",
+        "next": "siguiente →",
+        "index": "índice",
+        "index_title": "Índice",
+        "text_tree": "árbol en texto",
+        "lg_entry": "entrada (recibió de afuera)",
+        "lg_own_labeled": "propio con label",
+        "lg_own": "propio",
+        "th_wallet": "billetera",
+        "th_label": "label",
+        "th_entries": "entradas",
+        "mv_path": "RUTA",
+        "mv_file": "ARCHIVO",
+        "h_lang": "idioma de mensajes y reporte: en, es, ca"
+                  " (default: $BTCLABELS_LANG o en)",
+        "h_labels": "archivo o directorio (repetible; default: .)",
+        "h_server": "servidor Electrum host:puerto"
+                    " (default: $BTCLABELS_SERVER o bitcoin.lan:50001)",
+        "h_ssl": "conectar con TLS",
+        "h_insecure": "no verificar el certificado (Fulcrum autofirmado)",
+        "h_max_depth": "profundidad máxima del recorrido (default: 15)",
+        "h_max_nodes": "por UTXO en report, total en trace (default: 300)",
+        "h_all": "seguir subiendo también por lo externo",
+        "h_merge": "junta todo en un BIP-329 único",
+        "h_out": "archivo de salida",
+        "h_quiet": "no listar cada conflicto",
+        "h_find": "busca labels por texto",
+        "h_text": "texto a buscar (sin distinguir mayúsculas)",
+        "h_trace": "rastrea el origen de UTXOs",
+        "h_dot": "además escribe el grafo en Graphviz (.dot)",
+        "h_refs": "txid:vout, txid o dirección",
+        "h_report": "todos los UTXOs vivos en un HTML",
+        "h_no_graph": "solo texto, sin Graphviz",
+    },
+    "ca": {
+        "doc": DOC_CA,
+        "no_files": "no he trobat fitxers d'etiquetes (.jsonl/.json)",
+        "bad_json": "{path}:{n}: JSON no vàlid: {err}",
+        "no_type_ref": "{path}:{n}: registre sense type/ref, omès",
+        "conflict": "conflicte {typ} {ref}: {a!r} + {b!r}",
+        "server_closed": "el servidor ha tancat la connexió",
+        "bad_b58": "checksum base58 no vàlid: {s}",
+        "bad_bech32": "checksum bech32 no vàlid: {s}",
+        "bad_addr": "adreça no suportada: {s}",
+        "no_utxos": "{ref}: sense UTXOs",
+        "merged": "{n} registres -> {out} ({c} conflictes)",
+        "graph_written": "graf -> {path} ({n} nodes)",
+        "live_utxos": "{n} UTXOs vius en {w} carteres",
+        "report_written": "informe -> {path}",
+        "no_dot": "avís: sense Graphviz (dot) no hi ha grafs, només text",
+        "seen": "(ja vist)",
+        "external": "extern",
+        "cut_depth": "... aturat per profunditat ({n})",
+        "cut_nodes": "... aturat per nombre de nodes ({n})",
+        "inputs": "entrades ({n}):",
+        "no_label": "(sense etiqueta)",
+        "prev": "← anterior",
+        "next": "següent →",
+        "index": "índex",
+        "index_title": "Índex",
+        "text_tree": "arbre en text",
+        "lg_entry": "entrada (rebut de fora)",
+        "lg_own_labeled": "propi amb etiqueta",
+        "lg_own": "propi",
+        "th_wallet": "cartera",
+        "th_label": "etiqueta",
+        "th_entries": "entrades",
+        "mv_path": "RUTA",
+        "mv_file": "FITXER",
+        "h_lang": "idioma dels missatges i de l'informe: en, es, ca"
+                  " (per defecte: $BTCLABELS_LANG o en)",
+        "h_labels": "fitxer o directori (repetible; per defecte: .)",
+        "h_server": "servidor Electrum host:port"
+                    " (per defecte: $BTCLABELS_SERVER o bitcoin.lan:50001)",
+        "h_ssl": "connectar amb TLS",
+        "h_insecure": "no verificar el certificat (Fulcrum autosignat)",
+        "h_max_depth": "profunditat màxima del recorregut (per defecte: 15)",
+        "h_max_nodes": "per UTXO a report, total a trace (per defecte: 300)",
+        "h_all": "continuar pujant també per l'extern",
+        "h_merge": "ajunta-ho tot en un únic BIP-329",
+        "h_out": "fitxer de sortida",
+        "h_quiet": "no llistar cada conflicte",
+        "h_find": "cerca etiquetes per text",
+        "h_text": "text a cercar (sense distingir majúscules)",
+        "h_trace": "rastreja l'origen d'UTXOs",
+        "h_dot": "a més escriu el graf en Graphviz (.dot)",
+        "h_refs": "txid:vout, txid o adreça",
+        "h_report": "tots els UTXOs vius en un HTML",
+        "h_no_graph": "només text, sense Graphviz",
+    },
+}
+
+
+def set_lang(lang):
+    global LANG
+    if lang not in LANGS:
+        raise ValueError(f"unsupported language: {lang}")
+    LANG = lang
+
+
+def t(key, **kw):
+    """Message `key` in the current language, formatted with `kw`."""
+    s = MSG[LANG].get(key, MSG["en"][key])
+    return s.format(**kw) if kw else s
+
+# ------------------------------------------------------------- reading
 
 
 def wallet_name(path):
@@ -55,7 +300,7 @@ def expand(paths, skip=()):
         else:
             files.append(p)
     if not files:
-        sys.exit("no encontré archivos de labels (.jsonl/.json)")
+        sys.exit(t("no_files"))
     return files
 
 
@@ -95,10 +340,9 @@ def load(path):
             try:
                 r = json.loads(line)
             except json.JSONDecodeError as e:
-                sys.exit(f"{path}:{n}: JSON inválido: {e}")
+                sys.exit(t("bad_json", path=path, n=n, err=e))
             if r.get("type") not in KEYS or "ref" not in r:
-                print(f"{path}:{n}: registro sin type/ref, salteado",
-                      file=sys.stderr)
+                print(t("no_type_ref", path=path, n=n), file=sys.stderr)
                 continue
             recs.append(r)
     w = wallet_name(path)
@@ -108,7 +352,7 @@ def load(path):
 
 
 def merge(paths, quiet=False, skip=()):
-    """Une por (type, ref). Devuelve (registros, conflictos)."""
+    """Merge by (type, ref). Returns (records, conflicts)."""
     out, conflicts = {}, 0
     for p in expand(paths, skip):
         for r in load(p):
@@ -125,7 +369,7 @@ def merge(paths, quiet=False, skip=()):
                 if a:
                     conflicts += 1
                     if not quiet:
-                        print(f"conflicto {k[0]} {k[1]}: {a!r} + {b!r}",
+                        print(t("conflict", typ=k[0], ref=k[1], a=a, b=b),
                               file=sys.stderr)
                 cur["label"] = f"{a} / {b}" if a else b
             for f, v in r.items():
@@ -167,7 +411,7 @@ class Electrum:
         while True:
             line = self.f.readline()
             if not line:
-                raise RuntimeError("el servidor cerró la conexión")
+                raise RuntimeError(t("server_closed"))
             resp = json.loads(line)
             if resp.get("id") == self.i:
                 break
@@ -176,7 +420,7 @@ class Electrum:
         return resp["result"]
 
     def call_many(self, method, params_list, chunk=100):
-        """Pipelining: manda de a `chunk` pedidos y lee las respuestas."""
+        """Pipelining: send `chunk` requests at a time, then read replies."""
         results = []
         for k in range(0, len(params_list), chunk):
             ids = {}
@@ -192,7 +436,7 @@ class Electrum:
             while pending:
                 line = self.f.readline()
                 if not line:
-                    raise RuntimeError("el servidor cerró la conexión")
+                    raise RuntimeError(t("server_closed"))
                 resp = json.loads(line)
                 if resp.get("id") not in ids:
                     continue
@@ -239,7 +483,7 @@ def decode_tx(hexstr):
     coinbase = len(ins) == 1 and ins[0][0] == "0" * 64
     return ins, outs, coinbase
 
-# ---------------------------------------------- script <-> dirección
+# ------------------------------------------------- script <-> address
 
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -266,7 +510,7 @@ def b58decode(s):
     raw = b"\0" * (len(s) - len(s.lstrip("1"))) + raw
     payload, chk = raw[:-4], raw[-4:]
     if dsha(payload)[:4] != chk:
-        raise ValueError(f"checksum base58 inválido: {s}")
+        raise ValueError(t("bad_b58", s=s))
     return payload
 
 
@@ -308,7 +552,7 @@ def segwit_decode(addr):
     ver = data[0]
     const = 1 if ver == 0 else 0x2bc830a3
     if _polymod(_hrp_expand(hrp) + data) != const:
-        raise ValueError(f"checksum bech32 inválido: {addr}")
+        raise ValueError(t("bad_bech32", s=addr))
     acc, bits, prog = 0, 0, []
     for v in data[1:-6]:
         acc = (acc << 5) | v
@@ -341,7 +585,7 @@ def addr_script(addr):
         return b"\x76\xa9\x14" + p[1:] + b"\x88\xac"
     if p[0] == 5:
         return b"\xa9\x14" + p[1:] + b"\x87"
-    raise ValueError(f"dirección no soportada: {addr}")
+    raise ValueError(t("bad_addr", s=addr))
 
 
 def scripthash(script):
@@ -351,11 +595,12 @@ def scripthash(script):
 
 
 class Tracer:
-    """Recorre hacia atrás desde UTXOs.
+    """Walks backwards from UTXOs.
 
-    "Propio" = output o dirección que aparece en algún export (Sparrow
-    exporta todos los outputs y direcciones, con o sin label). Se sube por
-    lo propio y se para en lo externo: ahí entró la plata a tus billeteras.
+    "Own" = an output or address that shows up in some export (Sparrow
+    exports every output and address, labeled or not). The walk goes up
+    through own outputs and stops at external ones: that is where the
+    coins entered your wallets.
     """
 
     def __init__(self, el, recs, max_depth, max_nodes, follow_labeled):
@@ -384,7 +629,7 @@ class Tracer:
             self.cache[t] = decode_tx(raw)
 
     def resolve(self, ref):
-        """txid:vout | txid | dirección -> lista de txid:vout."""
+        """txid:vout | txid | address -> list of txid:vout."""
         if OUTREF.match(ref):
             return [ref.lower()]
         if HEX64.match(ref):
@@ -393,7 +638,7 @@ class Tracer:
         sh = scripthash(addr_script(ref))
         utxos = self.el.call("blockchain.scripthash.listunspent", [sh])
         if not utxos:
-            print(f"{ref}: sin UTXOs", file=sys.stderr)
+            print(t("no_utxos", ref=ref), file=sys.stderr)
         return [f"{u['tx_hash']}:{u['tx_pos']}" for u in utxos]
 
     def info(self, ref):
@@ -416,12 +661,13 @@ class Tracer:
 
     def walk(self, ref, depth):
         if ref in self.seen:
-            self.emit(depth, f"{ref} (ya visto)")
+            self.emit(depth, f"{ref} {t('seen')}")
             return
         self.seen.add(ref)
         n = self.info(ref)
         self.nodes[ref] = n
-        who = f"  <{', '.join(n['own'])}>" if n["own"] else "  <externo>"
+        who = (f"  <{', '.join(n['own'])}>" if n["own"]
+               else f"  <{t('external')}>")
         self.emit(depth, f"{ref}  {n['val'] / 1e8:.8f} BTC"
                          f"  {n['addr'] or '?'}{who}")
         for typ, label, wallets in n["found"]:
@@ -432,15 +678,13 @@ class Tracer:
         if depth > 0 and not n["own"] and not self.follow:
             return
         if depth >= self.max_depth:
-            self.emit(depth + 1, f"... corte por profundidad"
-                                 f" ({self.max_depth})")
+            self.emit(depth + 1, t("cut_depth", n=self.max_depth))
             return
-        self.prefetch(t for t, _ in n["ins"])
-        self.emit(depth + 1, f"entradas ({len(n['ins'])}):")
+        self.prefetch(tx for tx, _ in n["ins"])
+        self.emit(depth + 1, t("inputs", n=len(n["ins"])))
         for ptx, pvout in n["ins"]:
             if len(self.nodes) >= self.max_nodes:
-                self.emit(depth + 1, f"... corte por cantidad de nodos"
-                                     f" ({self.max_nodes})")
+                self.emit(depth + 1, t("cut_nodes", n=self.max_nodes))
                 return
             pref = f"{ptx}:{pvout}"
             self.edges.append((pref, ref))
@@ -452,15 +696,14 @@ class Tracer:
         for r in refs:
             for start in self.resolve(r):
                 if len(self.nodes) >= self.max_nodes:
-                    self.emit(0, f"... corte por cantidad de nodos"
-                                 f" ({self.max_nodes})")
+                    self.emit(0, t("cut_nodes", n=self.max_nodes))
                     return
                 self.starts.append(start)
                 self.walk(start, 0)
                 self.lines.append("")
 
     def entries(self):
-        """Nodos propios que recibieron desde afuera (o coinbase)."""
+        """Own nodes that received from outside (or coinbase)."""
         return [(ref, n) for ref, n in self.nodes.items()
                 if n["own"] and (n["entry"] or n["coinbase"])]
 
@@ -481,7 +724,7 @@ class Tracer:
             if n["addr"]:
                 text.append(n["addr"][:12] + "…" + n["addr"][-6:])
             text.append(f"<{', '.join(n['own'])}>" if n["own"]
-                        else "<externo>")
+                        else f"<{t('external')}>")
             for typ, label, _ in n["found"]:
                 text.append(f"[{typ}] {label}")
             if n["coinbase"]:
@@ -501,7 +744,7 @@ class Tracer:
 
 
 def ownership(recs):
-    """outputs y direcciones que aparecen en los exports -> billeteras."""
+    """Outputs and addresses that appear in the exports -> wallets."""
     own_out, own_addr = {}, {}
     for r in recs:
         if r["type"] == "output":
@@ -512,10 +755,10 @@ def ownership(recs):
 
 
 def find_utxos(el, recs):
-    """UTXOs vivos entre los outputs exportados.
+    """Live UTXOs among the exported outputs.
 
-    La dirección sale del registro addr con el mismo origin+keypath; si no
-    está, de la transacción. Después, listunspent por dirección.
+    The address comes from the addr record with the same origin+keypath;
+    if there is none, from the transaction. Then listunspent per address.
     """
     by_path = {(r.get("origin"), r.get("keypath")): r["ref"]
                for r in recs if r["type"] == "addr" and r.get("keypath")}
@@ -592,7 +835,7 @@ def report(tr, utxos, out, nodot=False):
         ents = tr.entries()
         ent_txt = "<br>".join(
             esc(f"{e[0][:8]}… " + ("; ".join(lb for _, lb, _ in e[1]["found"])
-                                    or "(sin label)"))
+                                    or t("no_label")))
             for e in ents) or "—"
         frozen = " ❄" if r.get("spendable") is False else ""
         rows.append(
@@ -601,38 +844,39 @@ def report(tr, utxos, out, nodot=False):
             f"<td class=n>{n['val'] / 1e8:.8f}{frozen}</td>"
             f"<td>{esc(label)}</td><td>{ent_txt}</td></tr>")
         graph = svg_of(tr.dot()) if have_dot else None
-        prev = f"<a href='#u{i - 1}'>← anterior</a>" if i > 1 else ""
-        nxt = (f"<a href='#u{i + 1}'>siguiente →</a>"
+        prev = f"<a href='#u{i - 1}'>{t('prev')}</a>" if i > 1 else ""
+        nxt = (f"<a href='#u{i + 1}'>{t('next')}</a>"
                if i < len(utxos) else "")
         body = (f"<div class=graph>{graph}</div>" if graph else "")
         sections.append(
-            f"<section id='u{i}'><nav><a href='#top'>índice</a>{prev}{nxt}"
-            f"</nav><h2>{i}. {esc(w)} — {n['val'] / 1e8:.8f} BTC{frozen}</h2>"
+            f"<section id='u{i}'><nav><a href='#top'>{t('index')}</a>"
+            f"{prev}{nxt}</nav>"
+            f"<h2>{i}. {esc(w)} — {n['val'] / 1e8:.8f} BTC{frozen}</h2>"
             f"<p><code>{esc(ref)}</code><br>{esc(n['addr'] or '')}"
             f"<br>{esc(label)}</p>{body}"
-            f"<details{'' if graph else ' open'}><summary>árbol en texto"
+            f"<details{'' if graph else ' open'}><summary>{t('text_tree')}"
             f"</summary><pre>{esc(chr(10).join(tr.lines))}</pre></details>"
             f"</section>")
     wallets = "".join(
         f"<tr><td>{esc(w)}</td><td class=n>{v / 1e8:.8f}</td></tr>"
         for w, v in sorted(per_wallet.items(), key=lambda x: -x[1]))
-    legend = ("<p class=legend><span style='background:lightblue'>UTXO"
-              "</span><span style='background:gold'>entrada (recibió de"
-              " afuera)</span><span style='background:palegreen'>propio con"
-              " label</span><span>propio</span><span style='background:"
-              "lightgrey'>externo</span></p>")
-    doc = (f"<!doctype html><html><head><meta charset=utf-8>"
+    legend = (f"<p class=legend><span style='background:lightblue'>UTXO"
+              f"</span><span style='background:gold'>{t('lg_entry')}</span>"
+              f"<span style='background:palegreen'>{t('lg_own_labeled')}"
+              f"</span><span>{t('lg_own')}</span><span style='background:"
+              f"lightgrey'>{t('external')}</span></p>")
+    doc = (f"<!doctype html><html lang={LANG}><head><meta charset=utf-8>"
            f"<title>UTXOs</title><style>{CSS}</style></head><body id=top>"
            f"<h1>{len(utxos)} UTXOs — {total / 1e8:.8f} BTC</h1>"
            f"<table>{wallets}</table>{legend}"
-           f"<h2>Índice</h2><table><tr><th>#</th><th>billetera</th>"
-           f"<th>UTXO</th><th>BTC</th><th>label</th><th>entradas</th></tr>"
+           f"<h2>{t('index_title')}</h2><table><tr><th>#</th>"
+           f"<th>{t('th_wallet')}</th><th>UTXO</th><th>BTC</th>"
+           f"<th>{t('th_label')}</th><th>{t('th_entries')}</th></tr>"
            f"{''.join(rows)}</table>{''.join(sections)}</body></html>")
     with open(out, "w", encoding="utf-8") as f:
         f.write(doc)
     if not have_dot and not nodot:
-        print("aviso: sin Graphviz (dot) no hay grafos, solo texto",
-              file=sys.stderr)
+        print(t("no_dot"), file=sys.stderr)
 
 # ----------------------------------------------------------------- cli
 
@@ -644,54 +888,72 @@ def write_bip329(recs, path):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 
+def pick_lang(argv):
+    """--lang from argv (anywhere) or $BTCLABELS_LANG; English by default.
+
+    Resolved before building the parser so that --help is translated too.
+    """
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--lang", choices=LANGS,
+                     default=os.environ.get("BTCLABELS_LANG") or "en")
+    a, _ = pre.parse_known_args(argv)
+    return a.lang
+
+
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    set_lang(pick_lang(argv))
+
+    # --lang is accepted before or after the subcommand; SUPPRESS keeps the
+    # subparser from overwriting the value with its default.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--lang", choices=LANGS, default=argparse.SUPPRESS,
+                        help=t("h_lang"))
+
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+        description=t("doc"), formatter_class=argparse.RawTextHelpFormatter,
+        parents=[common])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def labels_arg(p):
-        p.add_argument("-l", "--labels", action="append", metavar="RUTA",
-                       help="archivo o directorio (repetible; default: .)")
+        p.add_argument("-l", "--labels", action="append",
+                       metavar=t("mv_path"), help=t("h_labels"))
 
     def server_args(p):
         p.add_argument("-s", "--server",
                        default=os.environ.get("BTCLABELS_SERVER",
                                               "bitcoin.lan:50001"),
-                       help="servidor Electrum host:puerto"
-                            " (default: $BTCLABELS_SERVER o bitcoin.lan:50001)")
-        p.add_argument("--ssl", action="store_true")
+                       help=t("h_server"))
+        p.add_argument("--ssl", action="store_true", help=t("h_ssl"))
         p.add_argument("--insecure", action="store_true",
-                       help="no verificar el cert (Fulcrum autofirmado)")
-        p.add_argument("--max-depth", type=int, default=15)
+                       help=t("h_insecure"))
+        p.add_argument("--max-depth", type=int, default=15,
+                       help=t("h_max_depth"))
         p.add_argument("--max-nodes", type=int, default=300,
-                       help="por UTXO en report, total en trace")
-        p.add_argument("--all", action="store_true",
-                       help="seguir subiendo también por lo externo")
+                       help=t("h_max_nodes"))
+        p.add_argument("--all", action="store_true", help=t("h_all"))
 
-    m = sub.add_parser("merge", help="junta todo en un BIP-329 único")
+    m = sub.add_parser("merge", help=t("h_merge"), parents=[common])
     labels_arg(m)
-    m.add_argument("-o", "--out", required=True)
-    m.add_argument("-q", "--quiet", action="store_true",
-                   help="no listar cada conflicto")
+    m.add_argument("-o", "--out", required=True, help=t("h_out"))
+    m.add_argument("-q", "--quiet", action="store_true", help=t("h_quiet"))
 
-    f = sub.add_parser("find", help="busca labels por texto")
+    f = sub.add_parser("find", help=t("h_find"), parents=[common])
     labels_arg(f)
-    f.add_argument("text")
+    f.add_argument("text", help=t("h_text"))
 
-    t = sub.add_parser("trace", help="rastrea el origen de UTXOs")
-    labels_arg(t)
-    server_args(t)
-    t.add_argument("--dot", metavar="ARCHIVO",
-                   help="además escribe el grafo en Graphviz (.dot)")
-    t.add_argument("refs", nargs="+", metavar="REF",
-                   help="txid:vout, txid o dirección")
+    tp = sub.add_parser("trace", help=t("h_trace"), parents=[common])
+    labels_arg(tp)
+    server_args(tp)
+    tp.add_argument("--dot", metavar=t("mv_file"), help=t("h_dot"))
+    tp.add_argument("refs", nargs="+", metavar="REF", help=t("h_refs"))
 
-    r = sub.add_parser("report", help="todos los UTXOs vivos en un HTML")
+    r = sub.add_parser("report", help=t("h_report"), parents=[common])
     labels_arg(r)
     server_args(r)
-    r.add_argument("-o", "--out", default="utxos.html")
-    r.add_argument("--no-graph", action="store_true",
-                   help="solo texto, sin Graphviz")
+    r.add_argument("-o", "--out", default="utxos.html", help=t("h_out"))
+    r.add_argument("--no-graph", action="store_true", help=t("h_no_graph"))
 
     a = ap.parse_args(argv)
     paths = a.labels or ["."]
@@ -699,7 +961,7 @@ def main(argv=None):
     if a.cmd == "merge":
         recs, conflicts = merge(paths, a.quiet, skip=[a.out])
         write_bip329(recs, a.out)
-        print(f"{len(recs)} registros -> {a.out} ({conflicts} conflictos)",
+        print(t("merged", n=len(recs), out=a.out, c=conflicts),
               file=sys.stderr)
         return
 
@@ -720,16 +982,16 @@ def main(argv=None):
         if a.dot:
             with open(a.dot, "w", encoding="utf-8") as fh:
                 fh.write(tr.dot())
-            print(f"grafo -> {a.dot} ({len(tr.nodes)} nodos)",
+            print(t("graph_written", path=a.dot, n=len(tr.nodes)),
                   file=sys.stderr)
         return
 
     utxos = find_utxos(el, recs)
-    print(f"{len(utxos)} UTXOs vivos en"
-          f" {len({w for u in utxos for w in u['_wallets']})} billeteras",
+    print(t("live_utxos", n=len(utxos),
+            w=len({w for u in utxos for w in u["_wallets"]})),
           file=sys.stderr)
     report(tr, utxos, a.out, a.no_graph)
-    print(f"reporte -> {os.path.abspath(a.out)}", file=sys.stderr)
+    print(t("report_written", path=os.path.abspath(a.out)), file=sys.stderr)
 
 
 if __name__ == "__main__":
