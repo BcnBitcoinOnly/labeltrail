@@ -35,8 +35,9 @@ labeltrail rebuilds that chain from data you already have.
    output and address of a wallet, labeled or not, with its keypath. Old
    Electrum label files (`{txid|address: label}`) work too. The file name,
    minus `-labels`, becomes the wallet name.
-2. **Find live coins.** Outputs from the exports are checked against the
-   server with `listunspent`, so only the coins you hold now show up.
+2. **Find live coins.** Every address in the exports is checked against the
+   server with `listunspent`, so only the coins you hold now show up, even
+   those received after the export was made.
 3. **Walk back.** From each UTXO it follows the inputs. While an output
    belongs to any of your wallets it keeps climbing, across wallets. It stops
    at the first output that is not yours: the **entry point**, where the coins
@@ -122,8 +123,8 @@ is the same in every language.
 
 - A wallet you never exported looks external, so the walk stops there.
   Export it and the trail continues.
-- Electrum label files have no output list: they add labels but not
-  ownership.
+- Electrum label files have no output list: only the addresses you labeled
+  count as yours. Unlabeled Electrum addresses look external.
 - Coinjoins: the other participants' inputs are external, so the walk stops
   at the mix. Label your premix outputs.
 - P2PK outputs (very old coins) have no address and can't be looked up.

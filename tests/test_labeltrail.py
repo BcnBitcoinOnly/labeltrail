@@ -40,7 +40,8 @@ class FakeElectrum:
 
     def call(self, method, params):
         if method == "blockchain.scripthash.listunspent":
-            return [{"tx_hash": r.split(":")[0], "tx_pos": int(r.split(":")[1])}
+            return [{"tx_hash": r.split(":")[0], "tx_pos": int(r.split(":")[1]),
+                     "value": 300000}
                     for r in self.unspent.get(params[0], [])]
         assert method == "blockchain.transaction.get", method
         with open(os.path.join(HERE, "fixtures", params[0] + ".hex")) as f:
@@ -206,6 +207,49 @@ class TestTrace(unittest.TestCase):
         utxos = b.find_utxos(el, merged)
         self.assertEqual(sorted(u["ref"] for u in utxos),
                          sorted([f"{TX_T}:0", f"{TX_Q}:0"]))
+
+    def test_find_utxos_from_electrum_address_labels(self):
+        # Electrum file: address labels only, no outputs, plus a junk key
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "vieja.json", json.dumps(
+                {ADDR_T: "bought on an exchange", "not-an-address": "x"}))
+            recs, _ = b.merge([d], quiet=True)
+        el = FakeElectrum(
+            {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
+        utxos = b.find_utxos(el, recs)
+        self.assertEqual(
+            [(u["ref"], u["label"], u["value"], u["_wallets"])
+             for u in utxos],
+            [(f"{TX_T}:0", "bought on an exchange", 300000, ["vieja"])])
+        tr = b.Tracer(el, recs, 15, 300, False)
+        tr.run([f"{TX_T}:0"])
+        self.assertEqual(tr.nodes[f"{TX_T}:0"]["own"], ["vieja"])
+
+    def test_find_utxos_received_after_export(self):
+        # Sparrow lists every derived address, but only the outputs it had
+        # when the file was written: a coin received later on ADDR_Q must
+        # still show up, under the wallet of the address.
+        origin = "wpkh([aaaaaaaa/84h/0h/0h])"
+        recs = [
+            {"type": "addr", "ref": ADDR_T, "origin": origin,
+             "keypath": "/0/0"},
+            {"type": "addr", "ref": ADDR_Q, "origin": origin,
+             "keypath": "/0/1", "label": "gap"},
+            {"type": "output", "ref": f"{TX_T}:0", "origin": origin,
+             "keypath": "/0/0", "value": 300000},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "Fria-labels.jsonl",
+                  "".join(json.dumps(r) + "\n" for r in recs))
+            merged, _ = b.merge([d], quiet=True)
+        el = FakeElectrum({
+            b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"],
+            b.scripthash(b.addr_script(ADDR_Q)): [f"{TX_Q}:0"]})
+        utxos = b.find_utxos(el, merged)
+        self.assertEqual(
+            sorted((u["ref"], u["_wallets"], u.get("label")) for u in utxos),
+            sorted([(f"{TX_T}:0", ["Fria"], None),
+                    (f"{TX_Q}:0", ["Fria"], "gap")]))
 
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(
