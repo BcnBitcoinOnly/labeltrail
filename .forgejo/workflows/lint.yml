@@ -1,0 +1,30 @@
+# Lint on the docker2 forgejo-runner: the same pre-commit hooks as locally.
+# Read-only; deploys nothing.
+name: lint
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    runs-on: docker
+    container:
+      image: node:24.22.2-bookworm@sha256:e7add2a490bb17d97b485b8641bd88455fff7839ade0f5eba493c3508124d413
+    timeout-minutes: 15
+    steps:
+      - uses: https://github.com/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Hook environments (gitleaks builds with Go) and the `pipx run` venv:
+      # without the cache that is ~40 s on every run.
+      - uses: https://data.forgejo.org/actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cache/pre-commit
+            ~/.local/pipx/.cache
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      - run: apt-get update -qq && apt-get install -y -qq pipx >/dev/null
+      - run: pipx run pre-commit run --all-files --show-diff-on-failure
