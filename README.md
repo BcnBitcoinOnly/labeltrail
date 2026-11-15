@@ -15,17 +15,26 @@ Labels; Electrum viejo: Wallet > Labels > Export también sirve). El nombre del
 archivo, sin `-labels`, se usa como nombre de la billetera.
 
     cd labels/
+    python3 btclabels.py report -s 10.0.0.5:50001
     python3 btclabels.py find "p2p"
     python3 btclabels.py trace -s 10.0.0.5:50001 bc1q...
     python3 btclabels.py trace -s 10.0.0.5:50001 --dot origen.dot TXID:VOUT
     dot -Tsvg origen.dot -o origen.svg
 
+- `report`: sin más input. Toma los outputs de los exports de Sparrow (que
+  incluyen todos, con o sin label), le pregunta al servidor cuáles siguen sin
+  gastar y arma `utxos.html`: totales por billetera, índice y una sección por
+  UTXO con su grafo (si está Graphviz) y el árbol en texto. Se sube por tus
+  propios outputs y se corta en el primero externo: ese es el punto por donde
+  entró la plata (amarillo en el grafo). El servidor también sale de
+  `$BTCLABELS_SERVER`.
 - `find TEXTO`: busca en todas las labels y dice de qué billetera sale cada una.
 - `trace REF...`: REF es `txid:vout`, un `txid` (todas sus salidas) o una
-  dirección (sus UTXOs actuales). Va hacia atrás por las entradas hasta dar con
-  algo etiquetado. Cortes: `--max-depth` (15), `--max-nodes` (300); `--all`
-  sigue subiendo aunque encuentre label.
-- `--dot`: grafo Graphviz. Azul = punto de partida, verde = con label.
+  dirección (sus UTXOs actuales). Mismo recorrido que `report`. Cortes:
+  `--max-depth` (15), `--max-nodes` (300); `--all` sigue subiendo también por
+  lo externo.
+- `--dot`: grafo Graphviz. Azul = punto de partida, amarillo = entrada desde
+  afuera, verde = propio con label, gris = externo.
 - `merge -o master.jsonl`: un BIP-329 único y sin duplicados, para importar en
   Sparrow o guardar como backup. Labels distintas para la misma referencia se
   unen con ` / `.
