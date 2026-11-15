@@ -40,7 +40,10 @@ archivo, sin `-labels`, se usa como nombre de la billetera.
   unen con ` / `.
 
 `-l RUTA` (repetible) elige archivos o carpetas; por defecto, la carpeta
-actual. SSL: `--ssl`, y `--insecure` si el certificado es autofirmado.
+actual. TLS: `--ssl` valida el certificado como un navegador. Para un Fulcrum
+con certificado autofirmado, la primera vez `--insecure` imprime su SHA-256;
+de ahí en adelante `--fingerprint <sha256>` (o `$BTCLABELS_FINGERPRINT`) lo
+fija y corta si cambia.
 
 ## Privacidad
 

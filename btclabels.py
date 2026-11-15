@@ -145,15 +145,24 @@ def index(recs):
 
 
 class Electrum:
-    def __init__(self, server, use_ssl, insecure):
+    def __init__(self, server, use_ssl, insecure, fingerprint=None):
         host, port = server.rsplit(":", 1)
         s = socket.create_connection((host, int(port)), timeout=60)
-        if use_ssl:
+        if use_ssl or insecure or fingerprint:
             ctx = ssl.create_default_context()
-            if insecure:
+            if insecure or fingerprint:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
             s = ctx.wrap_socket(s, server_hostname=host)
+            fp = hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest()
+            if fingerprint:
+                want = fingerprint.replace(":", "").lower()
+                if fp != want:
+                    sys.exit(f"el certificado de {server} no coincide con"
+                             f" --fingerprint (es {fp})")
+            elif insecure:
+                print(f"certificado sin verificar; para fijarlo:"
+                      f" --fingerprint {fp}", file=sys.stderr)
         self.f = s.makefile("rwb")
         self.i = 0
         self.call("server.version", ["btclabels", "1.4"])
@@ -661,7 +670,11 @@ def main(argv=None):
                             " (default: $BTCLABELS_SERVER o bitcoin.lan:50001)")
         p.add_argument("--ssl", action="store_true")
         p.add_argument("--insecure", action="store_true",
-                       help="no verificar el cert (Fulcrum autofirmado)")
+                       help="TLS sin verificar el cert; implica --ssl")
+        p.add_argument("--fingerprint", metavar="SHA256",
+                       default=os.environ.get("BTCLABELS_FINGERPRINT"),
+                       help="SHA-256 del cert del servidor (autofirmado);"
+                            " implica --ssl. Default: $BTCLABELS_FINGERPRINT")
         p.add_argument("--max-depth", type=int, default=15)
         p.add_argument("--max-nodes", type=int, default=300,
                        help="por UTXO en report, total en trace")
@@ -712,7 +725,7 @@ def main(argv=None):
                       f"  ({', '.join(rec['_wallets'])})")
         return
 
-    el = Electrum(a.server, a.ssl, a.insecure)
+    el = Electrum(a.server, a.ssl, a.insecure, a.fingerprint)
     tr = Tracer(el, recs, a.max_depth, a.max_nodes, a.all)
     if a.cmd == "trace":
         tr.run(a.refs)
