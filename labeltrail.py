@@ -106,6 +106,11 @@ MSG = {
         "merged": "{n} records -> {out} ({c} conflicts)",
         "graph_written": "graph -> {path} ({n} nodes)",
         "live_utxos": "{n} live UTXOs in {w} wallets",
+        "h_check": "per wallet: exported balance vs live UTXOs found",
+        "check_head": "wallet | txs | outputs | live | live BTC | export BTC",
+        "check_diff": "  ^ differs: the export may be stale (re-export"
+                      " after Sparrow syncs) or this is a labeltrail bug",
+        "check_none": "{w}: no outputs (not a Sparrow export), skipped",
         "report_written": "report -> {path}",
         "no_dot": "warning: without Graphviz (dot) there are no graphs,"
                   " text only",
@@ -172,6 +177,14 @@ MSG = {
         "merged": "{n} registros -> {out} ({c} conflictos)",
         "graph_written": "grafo -> {path} ({n} nodos)",
         "live_utxos": "{n} UTXOs vivos en {w} billeteras",
+        "h_check": "por billetera: saldo exportado vs UTXOs vivos encontrados",
+        "check_head": "billetera | txs | outputs | vivos | BTC vivos"
+                      " | BTC export",
+        "check_diff": "  ^ no coincide: el export puede estar viejo (exportar"
+                      " de nuevo con Sparrow sincronizado) o es un bug de"
+                      " labeltrail",
+        "check_none": "{w}: sin outputs (no es un export de Sparrow),"
+                      " salteado",
         "report_written": "reporte -> {path}",
         "no_dot": "aviso: sin Graphviz (dot) no hay grafos, solo texto",
         "seen": "(ya visto)",
@@ -235,6 +248,13 @@ MSG = {
         "merged": "{n} registres -> {out} ({c} conflictes)",
         "graph_written": "graf -> {path} ({n} nodes)",
         "live_utxos": "{n} UTXOs vius en {w} carteres",
+        "h_check": "per cartera: saldo exportat vs UTXOs vius trobats",
+        "check_head": "cartera | txs | outputs | vius | BTC vius | BTC export",
+        "check_diff": "  ^ no coincideix: l'export pot ser antic (exporta de"
+                      " nou amb Sparrow sincronitzat) o és un bug de"
+                      " labeltrail",
+        "check_none": "{w}: sense outputs (no és un export de Sparrow),"
+                      " omès",
         "report_written": "informe -> {path}",
         "no_dot": "avís: sense Graphviz (dot) no hi ha grafs, només text",
         "seen": "(ja vist)",
@@ -815,6 +835,27 @@ def find_utxos(el, recs):
     return utxos
 
 
+def wallet_check(el, paths):
+    """Per export file: balance according to the export (sum of its tx
+    `value`) against what find_utxos finds live."""
+    rows = []
+    for p in expand(paths):
+        recs = load(p)
+        w = wallet_name(p)
+        outs = [r for r in recs if r["type"] == "output"]
+        if not outs:
+            rows.append((w, None))
+            continue
+        for r in recs:
+            r["_wallets"] = [r.pop("_wallet")]
+        bal = sum(r.get("value") or 0 for r in recs if r["type"] == "tx")
+        live = find_utxos(el, recs)
+        live_sat = sum(r.get("value") or 0 for r in live)
+        txs = sum(1 for r in recs if r["type"] == "tx")
+        rows.append((w, (txs, len(outs), len(live), live_sat, bal)))
+    return rows
+
+
 def esc(s):
     return html.escape(str(s), quote=True)
 
@@ -984,6 +1025,10 @@ def main(argv=None):
     r.add_argument("-o", "--out", default="utxos.html", help=t("h_out"))
     r.add_argument("--no-graph", action="store_true", help=t("h_no_graph"))
 
+    c = sub.add_parser("check", help=t("h_check"), parents=[common])
+    labels_arg(c)
+    server_args(c)
+
     a = ap.parse_args(argv)
     paths = a.labels or ["."]
 
@@ -1004,6 +1049,19 @@ def main(argv=None):
         return
 
     el = Electrum(a.server, a.ssl, a.insecure, a.fingerprint)
+    if a.cmd == "check":
+        print(t("check_head"))
+        for w, row in wallet_check(el, paths):
+            if row is None:
+                print(t("check_none", w=w))
+                continue
+            txs, outs, n, live, bal = row
+            print(f"{w} | {txs} | {outs} | {n} | {live / 1e8:.8f}"
+                  f" | {bal / 1e8:.8f}")
+            if live != bal:
+                print(t("check_diff"))
+        return
+
     tr = Tracer(el, recs, a.max_depth, a.max_nodes, a.all)
     if a.cmd == "trace":
         tr.run(a.refs)
