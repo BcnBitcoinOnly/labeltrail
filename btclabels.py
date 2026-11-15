@@ -4,6 +4,7 @@
   btclabels.py merge [-l DIR] -o master.jsonl
   btclabels.py find  [-l DIR] TEXTO
   btclabels.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
+  btclabels.py report [-l DIR] [-s host:puerto] [-o utxos.html]
 
 -l (repetible) es un archivo o un directorio; por defecto, el directorio
 actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
@@ -12,16 +13,21 @@ archivo, sin "-labels", es el nombre de la billetera.
 
 REF es txid:vout, un txid (todas sus salidas) o una dirección (sus UTXOs
 actuales). trace consulta un servidor Electrum propio (Fulcrum, electrs) y
-recorre las entradas hacia atrás hasta dar con algo etiquetado.
+recorre las entradas hacia atrás por tus outputs hasta llegar a lo externo:
+por dónde entró la plata. report hace eso para todos los UTXOs vivos de los
+exports y arma un HTML con índice y un grafo por UTXO.
 Solo stdlib.
 """
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
 import socket
+import shutil
 import ssl
+import subprocess
 import sys
 
 KEYS = ("tx", "addr", "output", "input", "pubkey", "xpub")
@@ -168,6 +174,34 @@ class Electrum:
         if resp.get("error"):
             raise RuntimeError(f"{method}: {resp['error']}")
         return resp["result"]
+
+    def call_many(self, method, params_list, chunk=100):
+        """Pipelining: manda de a `chunk` pedidos y lee las respuestas."""
+        results = []
+        for k in range(0, len(params_list), chunk):
+            ids = {}
+            for params in params_list[k:k + chunk]:
+                self.i += 1
+                ids[self.i] = len(ids)
+                msg = {"jsonrpc": "2.0", "id": self.i,
+                       "method": method, "params": params}
+                self.f.write(json.dumps(msg).encode() + b"\n")
+            self.f.flush()
+            got = [None] * len(ids)
+            pending = len(ids)
+            while pending:
+                line = self.f.readline()
+                if not line:
+                    raise RuntimeError("el servidor cerró la conexión")
+                resp = json.loads(line)
+                if resp.get("id") not in ids:
+                    continue
+                if resp.get("error"):
+                    raise RuntimeError(f"{method}: {resp['error']}")
+                got[ids[resp["id"]]] = resp["result"]
+                pending -= 1
+            results += got
+        return results
 
 # ------------------------------------------------------------ tx decode
 
@@ -317,18 +351,37 @@ def scripthash(script):
 
 
 class Tracer:
-    def __init__(self, el, ix, max_depth, max_nodes, follow_labeled):
-        self.el, self.ix = el, ix
+    """Recorre hacia atrás desde UTXOs.
+
+    "Propio" = output o dirección que aparece en algún export (Sparrow
+    exporta todos los outputs y direcciones, con o sin label). Se sube por
+    lo propio y se para en lo externo: ahí entró la plata a tus billeteras.
+    """
+
+    def __init__(self, el, recs, max_depth, max_nodes, follow_labeled):
+        self.el = el
+        self.ix = index(recs)
+        self.own_out, self.own_addr = ownership(recs)
         self.max_depth, self.max_nodes = max_depth, max_nodes
         self.follow = follow_labeled
-        self.cache, self.seen = {}, set()
-        self.nodes, self.edges, self.starts = {}, [], []
+        self.cache = {}
+        self.reset()
+
+    def reset(self):
+        self.seen, self.nodes, self.edges = set(), {}, []
+        self.starts, self.lines = [], []
 
     def tx(self, txid):
         if txid not in self.cache:
             self.cache[txid] = decode_tx(
                 self.el.call("blockchain.transaction.get", [txid]))
         return self.cache[txid]
+
+    def prefetch(self, txids):
+        need = [t for t in dict.fromkeys(txids) if t not in self.cache]
+        for t, raw in zip(need, self.el.call_many(
+                "blockchain.transaction.get", [[t] for t in need])):
+            self.cache[t] = decode_tx(raw)
 
     def resolve(self, ref):
         """txid:vout | txid | dirección -> lista de txid:vout."""
@@ -343,60 +396,73 @@ class Tracer:
             print(f"{ref}: sin UTXOs", file=sys.stderr)
         return [f"{u['tx_hash']}:{u['tx_pos']}" for u in utxos]
 
-    def labels_of(self, txid, vout):
-        _, outs, _ = self.tx(txid)
-        val, spk = outs[vout]
+    def info(self, ref):
+        txid, vout = ref.split(":")
+        ins, outs, coinbase = self.tx(txid)
+        val, spk = outs[int(vout)]
         addr = script_addr(spk)
         found = []
-        for typ, key in (("output", f"{txid}:{vout}"), ("addr", addr),
-                         ("tx", txid)):
+        for typ, key in (("output", ref), ("addr", addr), ("tx", txid)):
             r = self.ix[typ].get(key) if key else None
             if r:
                 found.append((typ, r["label"], r.get("_wallets", [])))
-        return val, addr, found
+        wallets = self.own_out.get(ref) or self.own_addr.get(addr)
+        return {"val": val, "addr": addr, "found": found, "ins": ins,
+                "coinbase": coinbase, "own": wallets or [],
+                "entry": False}
+
+    def emit(self, depth, text):
+        self.lines.append("  " * depth + text)
 
     def walk(self, ref, depth):
-        pad = "  " * depth
         if ref in self.seen:
-            print(f"{pad}{ref} (ya visto)")
+            self.emit(depth, f"{ref} (ya visto)")
             return
         self.seen.add(ref)
-        txid, vout = ref.split(":")
-        val, addr, found = self.labels_of(txid, int(vout))
-        print(f"{pad}{ref}  {val / 1e8:.8f} BTC  {addr or '?'}")
-        for typ, label, wallets in found:
-            print(f"{pad}  [{typ}] {label}  ({', '.join(wallets)})")
-        if not found:
-            print(f"{pad}  (sin label)")
-        ins, _, coinbase = self.tx(txid)
-        self.nodes[ref] = (val, addr, found, coinbase)
-        if coinbase:
-            print(f"{pad}  coinbase")
+        n = self.info(ref)
+        self.nodes[ref] = n
+        who = f"  <{', '.join(n['own'])}>" if n["own"] else "  <externo>"
+        self.emit(depth, f"{ref}  {n['val'] / 1e8:.8f} BTC"
+                         f"  {n['addr'] or '?'}{who}")
+        for typ, label, wallets in n["found"]:
+            self.emit(depth + 1, f"[{typ}] {label}  ({', '.join(wallets)})")
+        if n["coinbase"]:
+            self.emit(depth + 1, "coinbase")
             return
-        if found and not self.follow and depth > 0:
+        if depth > 0 and not n["own"] and not self.follow:
             return
         if depth >= self.max_depth:
-            print(f"{pad}  ... corte por profundidad ({self.max_depth})")
+            self.emit(depth + 1, f"... corte por profundidad"
+                                 f" ({self.max_depth})")
             return
-        print(f"{pad}  entradas ({len(ins)}):")
-        for ptx, pvout in ins:
+        self.prefetch(t for t, _ in n["ins"])
+        self.emit(depth + 1, f"entradas ({len(n['ins'])}):")
+        for ptx, pvout in n["ins"]:
             if len(self.nodes) >= self.max_nodes:
-                print(f"{pad}  ... corte por cantidad de nodos"
-                      f" ({self.max_nodes})")
+                self.emit(depth + 1, f"... corte por cantidad de nodos"
+                                     f" ({self.max_nodes})")
                 return
             pref = f"{ptx}:{pvout}"
             self.edges.append((pref, ref))
             self.walk(pref, depth + 1)
+            if not self.nodes[pref]["own"]:
+                n["entry"] = True
 
     def run(self, refs):
         for r in refs:
             for start in self.resolve(r):
                 if len(self.nodes) >= self.max_nodes:
-                    print(f"... corte por cantidad de nodos ({self.max_nodes})")
+                    self.emit(0, f"... corte por cantidad de nodos"
+                                 f" ({self.max_nodes})")
                     return
                 self.starts.append(start)
                 self.walk(start, 0)
-                print()
+                self.lines.append("")
+
+    def entries(self):
+        """Nodos propios que recibieron desde afuera (o coinbase)."""
+        return [(ref, n) for ref, n in self.nodes.items()
+                if n["own"] and (n["entry"] or n["coinbase"])]
 
     def dot(self):
         def q(s):
@@ -408,25 +474,165 @@ class Tracer:
         lines = ["digraph utxo {", "  rankdir=LR;",
                  '  node [shape=box, style="rounded,filled",'
                  ' fontname="monospace", fontsize=10];']
-        for ref, (val, addr, found, coinbase) in self.nodes.items():
+        for ref, n in self.nodes.items():
             txid, vout = ref.split(":")
-            text = [f"{txid[:8]}…{txid[-4:]}:{vout}", f"{val / 1e8:.8f} BTC"]
-            if addr:
-                text.append(addr[:12] + "…" + addr[-6:])
-            for typ, label, wallets in found:
+            text = [f"{txid[:8]}…{txid[-4:]}:{vout}",
+                    f"{n['val'] / 1e8:.8f} BTC"]
+            if n["addr"]:
+                text.append(n["addr"][:12] + "…" + n["addr"][-6:])
+            text.append(f"<{', '.join(n['own'])}>" if n["own"]
+                        else "<externo>")
+            for typ, label, _ in n["found"]:
                 text.append(f"[{typ}] {label}")
-                if wallets:
-                    text.append(f"  ({', '.join(wallets)})")
-            if coinbase:
+            if n["coinbase"]:
                 text.append("coinbase")
             color = ("lightblue" if ref in self.starts else
-                     "palegreen" if found else "white")
+                     "gold" if n["entry"] else
+                     "palegreen" if n["found"] and n["own"] else
+                     "white" if n["own"] else "lightgrey")
             lines.append(f"  {q(ref)} [label={ql(chr(10).join(text))},"
                          f" fillcolor={color}];")
         for a, b in dict.fromkeys(self.edges):
             lines.append(f"  {q(a)} -> {q(b)};")
         lines.append("}")
         return "\n".join(lines) + "\n"
+
+# -------------------------------------------------------------- report
+
+
+def ownership(recs):
+    """outputs y direcciones que aparecen en los exports -> billeteras."""
+    own_out, own_addr = {}, {}
+    for r in recs:
+        if r["type"] == "output":
+            own_out[r["ref"]] = r.get("_wallets", [])
+        elif r["type"] == "addr":
+            own_addr[r["ref"]] = r.get("_wallets", [])
+    return own_out, own_addr
+
+
+def find_utxos(el, recs):
+    """UTXOs vivos entre los outputs exportados.
+
+    La dirección sale del registro addr con el mismo origin+keypath; si no
+    está, de la transacción. Después, listunspent por dirección.
+    """
+    by_path = {(r.get("origin"), r.get("keypath")): r["ref"]
+               for r in recs if r["type"] == "addr" and r.get("keypath")}
+    outs = [r for r in recs if r["type"] == "output"]
+    addr_of, missing = {}, []
+    for r in outs:
+        a = by_path.get((r.get("origin"), r.get("keypath")))
+        if a:
+            addr_of[r["ref"]] = a
+        else:
+            missing.append(r["ref"])
+    if missing:
+        txids = list(dict.fromkeys(m.split(":")[0] for m in missing))
+        raws = dict(zip(txids, el.call_many(
+            "blockchain.transaction.get", [[t] for t in txids])))
+        for m in missing:
+            txid, vout = m.split(":")
+            _, o, _ = decode_tx(raws[txid])
+            a = script_addr(o[int(vout)][1])
+            if a:
+                addr_of[m] = a
+    addrs = list(dict.fromkeys(addr_of.values()))
+    res = el.call_many("blockchain.scripthash.listunspent",
+                       [[scripthash(addr_script(a))] for a in addrs])
+    live = {f"{u['tx_hash']}:{u['tx_pos']}" for us in res for u in us}
+    utxos = [r for r in outs if r["ref"] in live]
+    utxos.sort(key=lambda r: (r["_wallets"][0], -(r.get("value") or 0)))
+    return utxos
+
+
+def esc(s):
+    return html.escape(str(s), quote=True)
+
+
+def svg_of(dot_src):
+    if not shutil.which("dot"):
+        return None
+    p = subprocess.run(["dot", "-Tsvg"], input=dot_src.encode(),
+                       capture_output=True, check=False)
+    if p.returncode:
+        return None
+    svg = p.stdout.decode()
+    return svg[svg.find("<svg"):]
+
+
+CSS = """
+body{font:14px system-ui,sans-serif;margin:2em;color:#222}
+table{border-collapse:collapse;width:100%}
+td,th{border-bottom:1px solid #ddd;padding:4px 8px;text-align:left;
+vertical-align:top}
+td.n{text-align:right;font-family:monospace}
+code,pre{font-family:monospace;font-size:12px}
+section{border-top:3px solid #333;margin-top:3em;padding-top:1em}
+nav a{margin-right:1em}
+.graph{overflow:auto;border:1px solid #ddd;padding:4px}
+.legend span{padding:2px 6px;margin-right:6px;border:1px solid #999}
+"""
+
+
+def report(tr, utxos, out, nodot=False):
+    rows, sections = [], []
+    total = 0
+    per_wallet = {}
+    have_dot = shutil.which("dot") and not nodot
+    for i, r in enumerate(utxos, 1):
+        ref = r["ref"]
+        tr.reset()
+        tr.run([ref])
+        n = tr.nodes[ref]
+        total += n["val"]
+        w = ", ".join(r["_wallets"])
+        per_wallet[w] = per_wallet.get(w, 0) + n["val"]
+        label = r.get("label") or ""
+        ents = tr.entries()
+        ent_txt = "<br>".join(
+            esc(f"{e[0][:8]}… " + ("; ".join(lb for _, lb, _ in e[1]["found"])
+                                    or "(sin label)"))
+            for e in ents) or "—"
+        frozen = " ❄" if r.get("spendable") is False else ""
+        rows.append(
+            f"<tr><td><a href='#u{i}'>{i}</a></td><td>{esc(w)}</td>"
+            f"<td><code>{esc(ref[:12])}…:{esc(ref.split(':')[1])}</code></td>"
+            f"<td class=n>{n['val'] / 1e8:.8f}{frozen}</td>"
+            f"<td>{esc(label)}</td><td>{ent_txt}</td></tr>")
+        graph = svg_of(tr.dot()) if have_dot else None
+        prev = f"<a href='#u{i - 1}'>← anterior</a>" if i > 1 else ""
+        nxt = (f"<a href='#u{i + 1}'>siguiente →</a>"
+               if i < len(utxos) else "")
+        body = (f"<div class=graph>{graph}</div>" if graph else "")
+        sections.append(
+            f"<section id='u{i}'><nav><a href='#top'>índice</a>{prev}{nxt}"
+            f"</nav><h2>{i}. {esc(w)} — {n['val'] / 1e8:.8f} BTC{frozen}</h2>"
+            f"<p><code>{esc(ref)}</code><br>{esc(n['addr'] or '')}"
+            f"<br>{esc(label)}</p>{body}"
+            f"<details{'' if graph else ' open'}><summary>árbol en texto"
+            f"</summary><pre>{esc(chr(10).join(tr.lines))}</pre></details>"
+            f"</section>")
+    wallets = "".join(
+        f"<tr><td>{esc(w)}</td><td class=n>{v / 1e8:.8f}</td></tr>"
+        for w, v in sorted(per_wallet.items(), key=lambda x: -x[1]))
+    legend = ("<p class=legend><span style='background:lightblue'>UTXO"
+              "</span><span style='background:gold'>entrada (recibió de"
+              " afuera)</span><span style='background:palegreen'>propio con"
+              " label</span><span>propio</span><span style='background:"
+              "lightgrey'>externo</span></p>")
+    doc = (f"<!doctype html><html><head><meta charset=utf-8>"
+           f"<title>UTXOs</title><style>{CSS}</style></head><body id=top>"
+           f"<h1>{len(utxos)} UTXOs — {total / 1e8:.8f} BTC</h1>"
+           f"<table>{wallets}</table>{legend}"
+           f"<h2>Índice</h2><table><tr><th>#</th><th>billetera</th>"
+           f"<th>UTXO</th><th>BTC</th><th>label</th><th>entradas</th></tr>"
+           f"{''.join(rows)}</table>{''.join(sections)}</body></html>")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(doc)
+    if not have_dot and not nodot:
+        print("aviso: sin Graphviz (dot) no hay grafos, solo texto",
+              file=sys.stderr)
 
 # ----------------------------------------------------------------- cli
 
@@ -447,6 +653,21 @@ def main(argv=None):
         p.add_argument("-l", "--labels", action="append", metavar="RUTA",
                        help="archivo o directorio (repetible; default: .)")
 
+    def server_args(p):
+        p.add_argument("-s", "--server",
+                       default=os.environ.get("BTCLABELS_SERVER",
+                                              "bitcoin.lan:50001"),
+                       help="servidor Electrum host:puerto"
+                            " (default: $BTCLABELS_SERVER o bitcoin.lan:50001)")
+        p.add_argument("--ssl", action="store_true")
+        p.add_argument("--insecure", action="store_true",
+                       help="no verificar el cert (Fulcrum autofirmado)")
+        p.add_argument("--max-depth", type=int, default=15)
+        p.add_argument("--max-nodes", type=int, default=300,
+                       help="por UTXO en report, total en trace")
+        p.add_argument("--all", action="store_true",
+                       help="seguir subiendo también por lo externo")
+
     m = sub.add_parser("merge", help="junta todo en un BIP-329 único")
     labels_arg(m)
     m.add_argument("-o", "--out", required=True)
@@ -459,19 +680,19 @@ def main(argv=None):
 
     t = sub.add_parser("trace", help="rastrea el origen de UTXOs")
     labels_arg(t)
-    t.add_argument("-s", "--server", default="bitcoin.lan:50001",
-                   help="servidor Electrum host:puerto")
-    t.add_argument("--ssl", action="store_true")
-    t.add_argument("--insecure", action="store_true",
-                   help="no verificar el cert (Fulcrum autofirmado)")
-    t.add_argument("--max-depth", type=int, default=15)
-    t.add_argument("--max-nodes", type=int, default=300)
-    t.add_argument("--all", action="store_true",
-                   help="seguir subiendo aunque haya label")
+    server_args(t)
     t.add_argument("--dot", metavar="ARCHIVO",
                    help="además escribe el grafo en Graphviz (.dot)")
     t.add_argument("refs", nargs="+", metavar="REF",
                    help="txid:vout, txid o dirección")
+
+    r = sub.add_parser("report", help="todos los UTXOs vivos en un HTML")
+    labels_arg(r)
+    server_args(r)
+    r.add_argument("-o", "--out", default="utxos.html")
+    r.add_argument("--no-graph", action="store_true",
+                   help="solo texto, sin Graphviz")
+
     a = ap.parse_args(argv)
     paths = a.labels or ["."]
 
@@ -485,19 +706,30 @@ def main(argv=None):
     recs, _ = merge(paths, quiet=True)
     if a.cmd == "find":
         needle = a.text.lower()
-        for r in recs:
-            if needle in r.get("label", "").lower():
-                print(f"{r['type']:6} {r['ref']}  {r['label']}"
-                      f"  ({', '.join(r['_wallets'])})")
+        for rec in recs:
+            if needle in rec.get("label", "").lower():
+                print(f"{rec['type']:6} {rec['ref']}  {rec['label']}"
+                      f"  ({', '.join(rec['_wallets'])})")
         return
 
-    tr = Tracer(Electrum(a.server, a.ssl, a.insecure), index(recs),
-                a.max_depth, a.max_nodes, a.all)
-    tr.run(a.refs)
-    if a.dot:
-        with open(a.dot, "w", encoding="utf-8") as fh:
-            fh.write(tr.dot())
-        print(f"grafo -> {a.dot} ({len(tr.nodes)} nodos)", file=sys.stderr)
+    el = Electrum(a.server, a.ssl, a.insecure)
+    tr = Tracer(el, recs, a.max_depth, a.max_nodes, a.all)
+    if a.cmd == "trace":
+        tr.run(a.refs)
+        print("\n".join(tr.lines))
+        if a.dot:
+            with open(a.dot, "w", encoding="utf-8") as fh:
+                fh.write(tr.dot())
+            print(f"grafo -> {a.dot} ({len(tr.nodes)} nodos)",
+                  file=sys.stderr)
+        return
+
+    utxos = find_utxos(el, recs)
+    print(f"{len(utxos)} UTXOs vivos en"
+          f" {len({w for u in utxos for w in u['_wallets']})} billeteras",
+          file=sys.stderr)
+    report(tr, utxos, a.out, a.no_graph)
+    print(f"reporte -> {os.path.abspath(a.out)}", file=sys.stderr)
 
 
 if __name__ == "__main__":
