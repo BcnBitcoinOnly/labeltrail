@@ -1,0 +1,6 @@
+*.dot
+*.svg
+*.png
+*.jsonl
+!tests/fixtures/*.jsonl
+__pycache__/
