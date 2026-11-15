@@ -386,8 +386,17 @@ def load(path):
                 continue
             recs.append(r)
     w = wallet_name(path)
+    # Address of each output, resolved inside this file: (origin, keypath)
+    # is only unique within one wallet. Watch-only wallets without a real
+    # fingerprint, or two wallets on the same keys, share it across files.
+    by_path = {(r.get("origin"), r.get("keypath")): r["ref"]
+               for r in recs if r["type"] == "addr" and r.get("keypath")}
     for r in recs:
         r["_wallet"] = w
+        if r["type"] == "output" and r.get("keypath"):
+            a = by_path.get((r.get("origin"), r["keypath"]))
+            if a:
+                r["_addr"] = a
     return recs
 
 
@@ -803,15 +812,14 @@ def ownership(recs):
 def find_utxos(el, recs):
     """Live UTXOs among the exported outputs.
 
-    The address comes from the addr record with the same origin+keypath;
-    if there is none, from the transaction. Then listunspent per address.
+    The address comes from the addr record with the same origin+keypath in
+    the same export file (resolved in load); if there is none, from the
+    transaction. Then listunspent per address.
     """
-    by_path = {(r.get("origin"), r.get("keypath")): r["ref"]
-               for r in recs if r["type"] == "addr" and r.get("keypath")}
     outs = [r for r in recs if r["type"] == "output"]
     addr_of, missing = {}, []
     for r in outs:
-        a = by_path.get((r.get("origin"), r.get("keypath")))
+        a = r.get("_addr")
         if a:
             addr_of[r["ref"]] = a
         else:
