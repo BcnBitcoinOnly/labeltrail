@@ -106,6 +106,33 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(lines, [{"type": "tx", "ref": HAL, "label": "x"}])
 
 
+    def test_merge_output_read_back_keeps_labels(self):
+        with tempfile.TemporaryDirectory() as d:
+            for w, label in (("A", "kyc"), ("B", "p2p")):
+                write(d, f"{w}-labels.jsonl", json.dumps(
+                    {"type": "tx", "ref": HAL, "label": label}) + "\n")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                b.main(["merge", "-q", "-l", d,
+                        "-o", os.path.join(d, "master.jsonl")])
+                recs, conflicts = b.merge([d], quiet=True)
+        self.assertIn("master", err.getvalue())
+        self.assertEqual([r["label"] for r in recs], ["kyc / p2p"])
+        self.assertEqual(conflicts, 1)
+
+    def test_null_label(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "A-labels.jsonl",
+                  json.dumps({"type": "tx", "ref": HAL, "label": None})
+                  + "\n[1]\n"
+                  + json.dumps({"type": "tx", "ref": HAL, "label": "x"})
+                  + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(out):
+                b.main(["find", "-l", d, "x"])
+        self.assertIn(f"{HAL}  x  (A)", out.getvalue())
+
+
 class TestTrace(unittest.TestCase):
     def setUp(self):
         b.set_lang("en")
@@ -153,6 +180,21 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(rows["Fria"], (1, 1, 1, 300000, 300000))
         self.assertIsNone(rows["electrum_vieja"])
 
+    def test_find_utxos_same_origin_in_two_wallets(self):
+        # two watch-only wallets share origin and keypath, not addresses
+        origin = "wpkh([00000000/84h/0h/0h])"
+        recs = []
+        for w, addr, tx in (("A", ADDR_T, TX_T), ("B", ADDR_Q, TX_Q)):
+            recs += [
+                {"type": "addr", "ref": addr, "origin": origin,
+                 "keypath": "/0/0", "_wallets": [w]},
+                {"type": "output", "ref": f"{tx}:0", "origin": origin,
+                 "keypath": "/0/0", "_wallets": [w]}]
+        el = FakeElectrum({b.scripthash(b.addr_script(a)): [f"{tx}:0"]
+                           for a, tx in ((ADDR_T, TX_T), (ADDR_Q, TX_Q))})
+        self.assertEqual(sorted(u["ref"] for u in b.find_utxos(el, recs)),
+                         sorted([f"{TX_T}:0", f"{TX_Q}:0"]))
+
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(
             "blockchain.transaction.get", [HAL]))
@@ -189,6 +231,10 @@ class TestI18n(unittest.TestCase):
             os.environ["LABELTRAIL_LANG"] = "es"
             self.assertEqual(b.pick_lang(["find", "x"]), "es")
             self.assertEqual(b.pick_lang(["--lang", "en", "find", "x"]), "en")
+            os.environ["LABELTRAIL_LANG"] = "fr"
+            with self.assertRaises(SystemExit) as cm:
+                b.pick_lang(["find", "x"])
+            self.assertIn("LABELTRAIL_LANG=fr", cm.exception.code)
         finally:
             os.environ.pop("LABELTRAIL_LANG", None)
             if env is not None:

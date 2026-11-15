@@ -83,9 +83,13 @@ tree per UTXO.
   UTXOs). `--dot file.dot` writes the graph.
 - `find TEXT`: search every label in every wallet and show which wallet it
   lives in.
-- `merge -o all.jsonl`: one deduplicated BIP-329 file from all exports, for
-  backup or to import into Sparrow. Different labels for the same item are
-  joined with ` / `.
+- `merge -o ../all.jsonl`: one deduplicated BIP-329 file from all exports,
+  for backup or to import into Sparrow. Different labels for the same item
+  are joined with ` / `. Write it outside the exports folder: inside, later
+  runs read it back as one more wallet (`merge` warns about it).
+- `check`: per wallet, the balance according to the export against the live
+  UTXOs found. A difference means the export is stale: re-export it from
+  Sparrow once it has synced.
 
 Common options:
 
