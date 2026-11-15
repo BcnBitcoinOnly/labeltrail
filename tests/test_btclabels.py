@@ -13,6 +13,13 @@ import btclabels as b  # noqa: E402
 HAL = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
 CB9 = "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"
 
+# cadena segwit real: TX_P:0 (externo) -> TX_Q:0 -> TX_T:0
+TX_T = "1775306e7f77d114ff63e06d7cef504f46e358c199234a447a1ff8e125d39849"
+TX_Q = "7675c11be6432692d6ca6fad21b664fe6b4e51feb51aaecd549a844edb2bf986"
+TX_P = "6d622e41361df6f3aed29dac9f1dd19f19bf57b6afa62c274e73e14702235d14"
+ADDR_T = "bc1qm8k33fxhywrfrxrj8ztjgjjqccw0uqfsy8rk5y"
+ADDR_Q = "bc1qeuza2h58gkrqdk5sha9etq8n8drjej44fuahka"
+
 VECTORS = {
     "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4":
         "0014751e76e8199196d454941c45d1b3a323f1433bd6",
@@ -26,12 +33,21 @@ VECTORS = {
 
 
 class FakeElectrum:
-    """Sirve txs desde tests/fixtures/<txid>.hex."""
+    """Sirve txs desde tests/fixtures/<txid>.hex y UTXOs desde `unspent`."""
+
+    def __init__(self, unspent=None):
+        self.unspent = unspent or {}
 
     def call(self, method, params):
+        if method == "blockchain.scripthash.listunspent":
+            return [{"tx_hash": r.split(":")[0], "tx_pos": int(r.split(":")[1])}
+                    for r in self.unspent.get(params[0], [])]
         assert method == "blockchain.transaction.get", method
         with open(os.path.join(HERE, "fixtures", params[0] + ".hex")) as f:
             return f.read().strip()
+
+    def call_many(self, method, params_list):
+        return [self.call(method, p) for p in params_list]
 
 
 def write(d, name, content):
@@ -94,11 +110,9 @@ class TestTrace(unittest.TestCase):
     def test_trace_to_coinbase(self):
         recs = [{"type": "output", "ref": f"{CB9}:0", "label": "minado",
                  "_wallets": ["Fria"]}]
-        tr = b.Tracer(FakeElectrum(), b.index(recs), 15, 300, False)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            tr.run([f"{HAL}:0", HAL])
-        text = out.getvalue()
+        tr = b.Tracer(FakeElectrum(), recs, 15, 300, False)
+        tr.run([f"{HAL}:0", HAL])
+        text = "\n".join(tr.lines)
         self.assertIn("[output] minado  (Fria)", text)
         self.assertIn("coinbase", text)
         self.assertEqual(tr.starts, [f"{HAL}:0", f"{HAL}:0", f"{HAL}:1"])
@@ -106,6 +120,40 @@ class TestTrace(unittest.TestCase):
         dot = tr.dot()
         self.assertIn(f'"{CB9}:0" -> "{HAL}:0";', dot)
         self.assertIn("palegreen", dot)
+
+    def test_report_finds_utxos_and_entries(self):
+        origin = "wpkh([aaaaaaaa/84h/0h/0h])"
+        recs = [
+            {"type": "addr", "ref": ADDR_T, "origin": origin,
+             "keypath": "/0/1"},
+            {"type": "addr", "ref": ADDR_Q, "origin": origin,
+             "keypath": "/0/0"},
+            {"type": "output", "ref": f"{TX_T}:0", "origin": origin,
+             "keypath": "/0/1", "value": 1},
+            {"type": "output", "ref": f"{TX_Q}:0", "origin": origin,
+             "keypath": "/0/0", "label": "compra P2P"},
+            {"type": "tx", "ref": TX_Q, "label": "compra a Juan"},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "Fria-labels.jsonl",
+                  "".join(json.dumps(r) + "\n" for r in recs))
+            merged, _ = b.merge([d], quiet=True)
+            el = FakeElectrum(
+                {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
+            utxos = b.find_utxos(el, merged)
+            self.assertEqual([u["ref"] for u in utxos], [f"{TX_T}:0"])
+            tr = b.Tracer(el, merged, 15, 300, False)
+            out = os.path.join(d, "r.html")
+            with contextlib.redirect_stderr(io.StringIO()):
+                b.report(tr, utxos, out, nodot=True)
+            with open(out, encoding="utf-8") as f:
+                page = f.read()
+        self.assertEqual([r for r, _ in tr.entries()], [f"{TX_Q}:0"])
+        self.assertIn(f"{TX_P}:0", tr.nodes)
+        self.assertEqual(tr.nodes[f"{TX_P}:0"]["own"], [])
+        self.assertIn("1 UTXOs", page)
+        self.assertIn("compra P2P", page)
+        self.assertIn("&lt;externo&gt;", page)
 
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(
