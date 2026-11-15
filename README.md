@@ -1,56 +1,67 @@
 # btc-labels
 
-Junta las labels BIP-329 de muchas billeteras y rastrea de dónde viene cada
-UTXO, consultando tu propio servidor Electrum (Fulcrum, electrs). Un solo
-archivo Python, sin dependencias.
+Merges the BIP-329 labels of many wallets and traces where each UTXO comes
+from, querying your own Electrum server (Fulcrum, electrs). A single Python
+file, no dependencies.
 
-El problema: cuando movés coins de una billetera a otra, la nueva solo ve la
-transacción de migración. Las labels de origen (compra P2P, sueldo, minado)
-quedan en la billetera vieja y se pierde el rastro.
+The problem: when you move coins from one wallet to another, the new wallet
+only sees the migration transaction. The origin labels (P2P purchase,
+salary, mining) stay in the old wallet and the trail is lost.
 
-## Uso
+## Usage
 
-Exportá las labels de cada billetera a una carpeta (Sparrow: File > Export >
-Labels; Electrum viejo: Wallet > Labels > Export también sirve). El nombre del
-archivo, sin `-labels`, se usa como nombre de la billetera.
+Export the labels of each wallet into one folder (Sparrow: File > Export >
+Labels; old Electrum: Wallet > Labels > Export works too). The file name,
+without `-labels`, is used as the wallet name.
 
     cd labels/
     python3 btclabels.py report -s 10.0.0.5:50001
     python3 btclabels.py find "p2p"
     python3 btclabels.py trace -s 10.0.0.5:50001 bc1q...
-    python3 btclabels.py trace -s 10.0.0.5:50001 --dot origen.dot TXID:VOUT
-    dot -Tsvg origen.dot -o origen.svg
+    python3 btclabels.py trace -s 10.0.0.5:50001 --dot origin.dot TXID:VOUT
+    dot -Tsvg origin.dot -o origin.svg
 
-- `report`: sin más input. Toma los outputs de los exports de Sparrow (que
-  incluyen todos, con o sin label), le pregunta al servidor cuáles siguen sin
-  gastar y arma `utxos.html`: totales por billetera, índice y una sección por
-  UTXO con su grafo (si está Graphviz) y el árbol en texto. Se sube por tus
-  propios outputs y se corta en el primero externo: ese es el punto por donde
-  entró la plata (amarillo en el grafo). El servidor también sale de
-  `$BTCLABELS_SERVER`.
-- `find TEXTO`: busca en todas las labels y dice de qué billetera sale cada una.
-- `trace REF...`: REF es `txid:vout`, un `txid` (todas sus salidas) o una
-  dirección (sus UTXOs actuales). Mismo recorrido que `report`. Cortes:
-  `--max-depth` (15), `--max-nodes` (300); `--all` sigue subiendo también por
-  lo externo.
-- `--dot`: grafo Graphviz. Azul = punto de partida, amarillo = entrada desde
-  afuera, verde = propio con label, gris = externo.
-- `merge -o master.jsonl`: un BIP-329 único y sin duplicados, para importar en
-  Sparrow o guardar como backup. Labels distintas para la misma referencia se
-  unen con ` / `.
+- `report`: no further input. Takes the outputs from the Sparrow exports
+  (which include all of them, labeled or not), asks the server which ones
+  are still unspent and builds `utxos.html`: totals per wallet, an index and
+  one section per UTXO with its graph (if Graphviz is installed) and the
+  text tree. The walk goes up through your own outputs and stops at the
+  first external one: that is where the coins entered (yellow in the
+  graph). The server can also come from `$BTCLABELS_SERVER`.
+- `find TEXT`: searches every label and says which wallet each one comes
+  from.
+- `trace REF...`: REF is `txid:vout`, a `txid` (all its outputs) or an
+  address (its current UTXOs). Same walk as `report`. Limits:
+  `--max-depth` (15), `--max-nodes` (300); `--all` keeps walking back
+  through external outputs too.
+- `--dot`: Graphviz graph. Blue = starting point, yellow = entry from
+  outside, green = own with a label, grey = external.
+- `merge -o master.jsonl`: a single BIP-329 file without duplicates, to
+  import into Sparrow or keep as a backup. Different labels for the same
+  reference are joined with ` / `.
 
-`-l RUTA` (repetible) elige archivos o carpetas; por defecto, la carpeta
-actual. SSL: `--ssl`, y `--insecure` si el certificado es autofirmado.
+`-l PATH` (repeatable) picks files or folders; by default, the current
+folder. SSL: `--ssl`, plus `--insecure` if the certificate is self-signed.
 
-## Privacidad
+## Language
 
-- Usá tu propio servidor Electrum: el rastreo le pregunta por cada
-  transacción y dirección del árbol.
-- Los exports, el master y los `.dot`/`.svg` son el mapa de tus coins.
-  Guardalos cifrados.
+Messages, `--help` and the HTML report are in English by default. Spanish
+and Catalan are available with `--lang es` / `--lang ca` (before or after
+the subcommand) or `BTCLABELS_LANG=es|ca`. The BIP-329 output of `merge`
+is the same in every language.
+
+    python3 btclabels.py --lang ca report
+    BTCLABELS_LANG=es python3 btclabels.py --help
+
+## Privacy
+
+- Use your own Electrum server: tracing asks it about every transaction
+  and address in the tree.
+- The exports, the master file and the `.dot`/`.svg`/`.html` files are a
+  map of your coins. Keep them encrypted.
 
 ## Tests
 
     python3 -m unittest discover -s tests
 
-Offline: transacciones de prueba en `tests/fixtures/`, vectores de BIP-173/350.
+Offline: test transactions in `tests/fixtures/`, BIP-173/350 vectors.

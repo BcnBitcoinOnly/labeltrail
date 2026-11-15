@@ -13,7 +13,7 @@ import btclabels as b  # noqa: E402
 HAL = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
 CB9 = "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"
 
-# cadena segwit real: TX_P:0 (externo) -> TX_Q:0 -> TX_T:0
+# real segwit chain: TX_P:0 (external) -> TX_Q:0 -> TX_T:0
 TX_T = "1775306e7f77d114ff63e06d7cef504f46e358c199234a447a1ff8e125d39849"
 TX_Q = "7675c11be6432692d6ca6fad21b664fe6b4e51feb51aaecd549a844edb2bf986"
 TX_P = "6d622e41361df6f3aed29dac9f1dd19f19bf57b6afa62c274e73e14702235d14"
@@ -33,7 +33,7 @@ VECTORS = {
 
 
 class FakeElectrum:
-    """Sirve txs desde tests/fixtures/<txid>.hex y UTXOs desde `unspent`."""
+    """Serves txs from tests/fixtures/<txid>.hex and UTXOs from `unspent`."""
 
     def __init__(self, unspent=None):
         self.unspent = unspent or {}
@@ -107,6 +107,9 @@ class TestMerge(unittest.TestCase):
 
 
 class TestTrace(unittest.TestCase):
+    def setUp(self):
+        b.set_lang("en")
+
     def test_trace_to_coinbase(self):
         recs = [{"type": "output", "ref": f"{CB9}:0", "label": "minado",
                  "_wallets": ["Fria"]}]
@@ -122,38 +125,14 @@ class TestTrace(unittest.TestCase):
         self.assertIn("palegreen", dot)
 
     def test_report_finds_utxos_and_entries(self):
-        origin = "wpkh([aaaaaaaa/84h/0h/0h])"
-        recs = [
-            {"type": "addr", "ref": ADDR_T, "origin": origin,
-             "keypath": "/0/1"},
-            {"type": "addr", "ref": ADDR_Q, "origin": origin,
-             "keypath": "/0/0"},
-            {"type": "output", "ref": f"{TX_T}:0", "origin": origin,
-             "keypath": "/0/1", "value": 1},
-            {"type": "output", "ref": f"{TX_Q}:0", "origin": origin,
-             "keypath": "/0/0", "label": "compra P2P"},
-            {"type": "tx", "ref": TX_Q, "label": "compra a Juan"},
-        ]
-        with tempfile.TemporaryDirectory() as d:
-            write(d, "Fria-labels.jsonl",
-                  "".join(json.dumps(r) + "\n" for r in recs))
-            merged, _ = b.merge([d], quiet=True)
-            el = FakeElectrum(
-                {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
-            utxos = b.find_utxos(el, merged)
-            self.assertEqual([u["ref"] for u in utxos], [f"{TX_T}:0"])
-            tr = b.Tracer(el, merged, 15, 300, False)
-            out = os.path.join(d, "r.html")
-            with contextlib.redirect_stderr(io.StringIO()):
-                b.report(tr, utxos, out, nodot=True)
-            with open(out, encoding="utf-8") as f:
-                page = f.read()
+        tr, page = report_page()
         self.assertEqual([r for r, _ in tr.entries()], [f"{TX_Q}:0"])
         self.assertIn(f"{TX_P}:0", tr.nodes)
         self.assertEqual(tr.nodes[f"{TX_P}:0"]["own"], [])
         self.assertIn("1 UTXOs", page)
         self.assertIn("compra P2P", page)
-        self.assertIn("&lt;externo&gt;", page)
+        self.assertIn("&lt;external&gt;", page)
+        self.assertIn("<html lang=en>", page)
 
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(
@@ -161,6 +140,97 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(ins, [(CB9, 0)])
         self.assertEqual([v for v, _ in outs], [10 * 10**8, 40 * 10**8])
         self.assertFalse(coinbase)
+
+
+class TestI18n(unittest.TestCase):
+    def tearDown(self):
+        b.set_lang("en")
+
+    def test_catalogs_have_the_same_keys(self):
+        for lang in b.LANGS:
+            self.assertEqual(set(b.MSG[lang]), set(b.MSG["en"]), lang)
+
+    def test_report_in_spanish_and_catalan(self):
+        for lang, words in (("es", ["&lt;externo&gt;", "Índice",
+                                    "billetera", "entradas (1):"]),
+                            ("ca", ["&lt;extern&gt;", "Índex", "cartera",
+                                    "entrades (1):"])):
+            b.set_lang(lang)
+            _, page = report_page()
+            self.assertIn(f"<html lang={lang}>", page)
+            for w in words:
+                self.assertIn(w, page, lang)
+
+    def test_pick_lang(self):
+        env = os.environ.pop("BTCLABELS_LANG", None)
+        try:
+            self.assertEqual(b.pick_lang(["find", "x"]), "en")
+            self.assertEqual(b.pick_lang(["--lang", "ca", "find", "x"]), "ca")
+            self.assertEqual(b.pick_lang(["find", "--lang", "es", "x"]), "es")
+            os.environ["BTCLABELS_LANG"] = "es"
+            self.assertEqual(b.pick_lang(["find", "x"]), "es")
+            self.assertEqual(b.pick_lang(["--lang", "en", "find", "x"]), "en")
+        finally:
+            os.environ.pop("BTCLABELS_LANG", None)
+            if env is not None:
+                os.environ["BTCLABELS_LANG"] = env
+
+    def test_cli_messages_follow_lang(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "A-labels.jsonl",
+                  json.dumps({"type": "tx", "ref": HAL, "label": "x"}) + "\n")
+            out = os.path.join(d, "master.jsonl")
+            for argv, msg in (
+                    (["merge", "-l", d, "-o", out], "1 records"),
+                    (["merge", "--lang", "es", "-l", d, "-o", out],
+                     "1 registros"),
+                    (["--lang", "ca", "merge", "-l", d, "-o", out],
+                     "1 registres")):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    b.main(argv)
+                self.assertIn(msg, err.getvalue(), argv)
+
+    def test_help_is_translated(self):
+        for argv, text in ((["--help"], "merge everything"),
+                           (["--lang", "es", "--help"], "junta todo"),
+                           (["--lang", "ca", "trace", "--help"],
+                            "txid:vout, txid o adreça")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), \
+                    self.assertRaises(SystemExit):
+                b.main(argv)
+            self.assertIn(text, out.getvalue(), argv)
+
+
+def report_page():
+    """Report for the real segwit chain: TX_T:0 is the only live UTXO."""
+    origin = "wpkh([aaaaaaaa/84h/0h/0h])"
+    recs = [
+        {"type": "addr", "ref": ADDR_T, "origin": origin,
+         "keypath": "/0/1"},
+        {"type": "addr", "ref": ADDR_Q, "origin": origin,
+         "keypath": "/0/0"},
+        {"type": "output", "ref": f"{TX_T}:0", "origin": origin,
+         "keypath": "/0/1", "value": 1},
+        {"type": "output", "ref": f"{TX_Q}:0", "origin": origin,
+         "keypath": "/0/0", "label": "compra P2P"},
+        {"type": "tx", "ref": TX_Q, "label": "compra a Juan"},
+    ]
+    with tempfile.TemporaryDirectory() as d:
+        write(d, "Fria-labels.jsonl",
+              "".join(json.dumps(r) + "\n" for r in recs))
+        merged, _ = b.merge([d], quiet=True)
+        el = FakeElectrum(
+            {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
+        utxos = b.find_utxos(el, merged)
+        assert [u["ref"] for u in utxos] == [f"{TX_T}:0"], utxos
+        tr = b.Tracer(el, merged, 15, 300, False)
+        out = os.path.join(d, "r.html")
+        with contextlib.redirect_stderr(io.StringIO()):
+            b.report(tr, utxos, out, nodot=True)
+        with open(out, encoding="utf-8") as f:
+            return tr, f.read()
 
 
 if __name__ == "__main__":
