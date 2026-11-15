@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Labels BIP-329 de muchas billeteras: merge, búsqueda y origen de UTXOs.
 
-  btclabels.py merge [-l DIR] -o master.jsonl
-  btclabels.py find  [-l DIR] TEXTO
-  btclabels.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
-  btclabels.py report [-l DIR] [-s host:puerto] [-o utxos.html]
+  labeltrail.py merge [-l DIR] -o master.jsonl
+  labeltrail.py find  [-l DIR] TEXTO
+  labeltrail.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
+  labeltrail.py report [-l DIR] [-s host:puerto] [-o utxos.html]
 
 -l (repetible) es un archivo o un directorio; por defecto, el directorio
 actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
@@ -165,7 +165,7 @@ class Electrum:
                       f" --fingerprint {fp}", file=sys.stderr)
         self.f = s.makefile("rwb")
         self.i = 0
-        self.call("server.version", ["btclabels", "1.4"])
+        self.call("server.version", ["labeltrail", "1.4"])
 
     def call(self, method, params):
         self.i += 1
@@ -664,17 +664,17 @@ def main(argv=None):
 
     def server_args(p):
         p.add_argument("-s", "--server",
-                       default=os.environ.get("BTCLABELS_SERVER",
+                       default=os.environ.get("LABELTRAIL_SERVER",
                                               "bitcoin.lan:50001"),
                        help="servidor Electrum host:puerto"
-                            " (default: $BTCLABELS_SERVER o bitcoin.lan:50001)")
+                            " (default: $LABELTRAIL_SERVER o bitcoin.lan:50001)")
         p.add_argument("--ssl", action="store_true")
         p.add_argument("--insecure", action="store_true",
                        help="TLS sin verificar el cert; implica --ssl")
         p.add_argument("--fingerprint", metavar="SHA256",
-                       default=os.environ.get("BTCLABELS_FINGERPRINT"),
+                       default=os.environ.get("LABELTRAIL_FINGERPRINT"),
                        help="SHA-256 del cert del servidor (autofirmado);"
-                            " implica --ssl. Default: $BTCLABELS_FINGERPRINT")
+                            " implica --ssl. Default: $LABELTRAIL_FINGERPRINT")
         p.add_argument("--max-depth", type=int, default=15)
         p.add_argument("--max-nodes", type=int, default=300,
                        help="por UTXO en report, total en trace")

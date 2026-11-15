@@ -1,59 +1,122 @@
-# btc-labels
+# labeltrail
 
-Junta las labels BIP-329 de muchas billeteras y rastrea de dónde viene cada
-UTXO, consultando tu propio servidor Electrum (Fulcrum, electrs). Un solo
-archivo Python, sin dependencias.
+**Follow every coin back to where it came from.**
 
-El problema: cuando movés coins de una billetera a otra, la nueva solo ve la
-transacción de migración. Las labels de origen (compra P2P, sueldo, minado)
-quedan en la billetera vieja y se pierde el rastro.
+labeltrail reads the BIP-329 label exports of all your wallets, past and
+present. It asks *your own* Electrum server (Fulcrum, electrs) which coins
+are still unspent, then walks each UTXO backwards through your own
+transactions until it reaches the point where the money entered your
+wallets. The result is one offline HTML page with every UTXO, its amount, its
+labels and a graph of its history.
 
-## Uso
+One Python file, standard library only. Nothing leaves your network.
 
-Exportá las labels de cada billetera a una carpeta (Sparrow: File > Export >
-Labels; Electrum viejo: Wallet > Labels > Export también sirve). El nombre del
-archivo, sin `-labels`, se usa como nombre de la billetera.
+## Why
 
-    cd labels/
-    python3 btclabels.py report -s 10.0.0.5:50001
-    python3 btclabels.py find "p2p"
-    python3 btclabels.py trace -s 10.0.0.5:50001 bc1q...
-    python3 btclabels.py trace -s 10.0.0.5:50001 --dot origen.dot TXID:VOUT
-    dot -Tsvg origen.dot -o origen.svg
+Labels die when coins move. You label a P2P purchase in one wallet, migrate
+to a new hardware wallet, consolidate, maybe pass through a multisig. Every
+hop creates a transaction the new wallet can see, but the *original* label
+(KYC or not, who paid you, what it was for) stays behind in a wallet you no
+longer open. A year later you have a UTXO and no idea what it is.
 
-- `report`: sin más input. Toma los outputs de los exports de Sparrow (que
-  incluyen todos, con o sin label), le pregunta al servidor cuáles siguen sin
-  gastar y arma `utxos.html`: totales por billetera, índice y una sección por
-  UTXO con su grafo (si está Graphviz) y el árbol en texto. Se sube por tus
-  propios outputs y se corta en el primero externo: ese es el punto por donde
-  entró la plata (amarillo en el grafo). El servidor también sale de
-  `$BTCLABELS_SERVER`.
-- `find TEXTO`: busca en todas las labels y dice de qué billetera sale cada una.
-- `trace REF...`: REF es `txid:vout`, un `txid` (todas sus salidas) o una
-  dirección (sus UTXOs actuales). Mismo recorrido que `report`. Cortes:
-  `--max-depth` (15), `--max-nodes` (300); `--all` sigue subiendo también por
-  lo externo.
-- `--dot`: grafo Graphviz. Azul = punto de partida, amarillo = entrada desde
-  afuera, verde = propio con label, gris = externo.
-- `merge -o master.jsonl`: un BIP-329 único y sin duplicados, para importar en
-  Sparrow o guardar como backup. Labels distintas para la misma referencia se
-  unen con ` / `.
+That matters for:
 
-`-l RUTA` (repetible) elige archivos o carpetas; por defecto, la carpeta
-actual. TLS: `--ssl` valida el certificado como un navegador. Para un Fulcrum
-con certificado autofirmado, la primera vez `--insecure` imprime su SHA-256;
-de ahí en adelante `--fingerprint <sha256>` (o `$BTCLABELS_FINGERPRINT`) lo
-fija y corta si cambia.
+- **Privacy**: knowing which coins are KYC and which aren't before you spend
+  them together.
+- **Taxes**: acquisition date and origin of each coin.
+- **Inheritance and audits**: someone else should be able to read your stash
+  without your memory.
 
-## Privacidad
+labeltrail rebuilds that chain from data you already have.
 
-- Usá tu propio servidor Electrum: el rastreo le pregunta por cada
-  transacción y dirección del árbol.
-- Los exports, el master y los `.dot`/`.svg` son el mapa de tus coins.
-  Guardalos cifrados.
+## How it works
+
+1. **Collect.** Every export in the folder is read. Sparrow exports every
+   output and address of a wallet, labeled or not, with its keypath. Old
+   Electrum label files (`{txid|address: label}`) work too. The file name,
+   minus `-labels`, becomes the wallet name.
+2. **Find live coins.** Outputs from the exports are checked against the
+   server with `listunspent`, so only the coins you hold now show up.
+3. **Walk back.** From each UTXO it follows the inputs. While an output
+   belongs to any of your wallets it keeps climbing, across wallets. It stops
+   at the first output that is not yours: the **entry point**, where the coins
+   came in from outside (or a coinbase).
+4. **Report.** Labels found along the way (output, address and transaction
+   labels, and which wallet each came from) are attached to every node.
+
+Graph colors:
+
+| color | meaning |
+|---|---|
+| blue | the UTXO you hold |
+| gold | entry point: yours, received from outside |
+| green | yours, labeled |
+| white | yours, no label |
+| grey | external |
+
+## Quick start
+
+Export the labels of every wallet into one folder. In Sparrow, open each
+wallet and use *File → Export Wallet → Labels*. Do it for old, empty wallets
+too: their labels are the ones you want to recover.
+
+    cd my-labels/
+    python3 labeltrail.py report -s fulcrum.lan:50002 --insecure
+    xdg-open utxos.html
+
+The first run with `--insecure` prints the server certificate's SHA-256. Pin
+it so later runs refuse anything else, and set the server once:
+
+    export LABELTRAIL_SERVER=fulcrum.lan:50002
+    export LABELTRAIL_FINGERPRINT=<sha256>
+    python3 labeltrail.py report
+
+Install Graphviz (`dot`) for graphs. Without it the report still has a text
+tree per UTXO.
+
+## Commands
+
+| command | what it does |
+|---|---|
+| `report` | All live UTXOs in one HTML: totals per wallet, index, one section per UTXO with graph and text tree |
+| `trace REF...` | Same walk for specific coins, printed as a tree. `REF` is `txid:vout`, a `txid` (all its outputs) or an address (its current UTXOs). `--dot file.dot` writes the graph |
+| `find TEXT` | Search every label in every wallet and show which wallet it lives in |
+| `merge -o all.jsonl` | One deduplicated BIP-329 file from all exports, for backup or to import into Sparrow. Different labels for the same item are joined with ` / ` |
+
+Common options:
+
+- `-l PATH`: export file or folder, repeatable. Default: current folder.
+- `-s HOST:PORT`, `--ssl`, `--insecure`, `--fingerprint SHA256`: server and
+  TLS. `--fingerprint` and `--insecure` imply TLS.
+- `--max-depth` (15), `--max-nodes` (300): limits per walk, so a coinjoin
+  doesn't blow up the graph. `--all` keeps climbing through external outputs.
+
+## Privacy
+
+- **Use your own server.** The walk asks the server about every transaction
+  and address in your history; a public server would learn your whole stash.
+- Keep that server on your LAN, so the queries never leave your network.
+- The exports, the `merge` output, `.dot`/`.svg` files and the HTML report
+  are a map of your coins. Store them encrypted and delete what you don't
+  keep.
+
+## Limits
+
+- A wallet you never exported looks external, so the walk stops there.
+  Export it and the trail continues.
+- Electrum label files have no output list: they add labels but not
+  ownership.
+- Coinjoins: the other participants' inputs are external, so the walk stops
+  at the mix. Label your premix outputs.
+- P2PK outputs (very old coins) have no address and can't be looked up.
 
 ## Tests
 
     python3 -m unittest discover -s tests
 
-Offline: transacciones de prueba en `tests/fixtures/`, vectores de BIP-173/350.
+Offline. Real transactions in `tests/fixtures/`, address vectors from BIP-173
+and BIP-350.
+
+## Status
+
+CLI messages are still in Spanish; the translation is tracked in issue #2.

@@ -8,7 +8,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import btclabels as b  # noqa: E402
+import labeltrail as b  # noqa: E402
 
 HAL = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
 CB9 = "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"
