@@ -8,7 +8,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import btclabels as b
+import labeltrail as b
 
 HAL = "f4184fc596403b9d638783cf57adfe4c75c605f6356fbc91338530e9831e9e16"
 CB9 = "0437cd7f8525ceed2324359c2d0ba26006d92d856a9c20fa0241106ee5a597c9"
@@ -162,18 +162,18 @@ class TestI18n(unittest.TestCase):
                 self.assertIn(w, page, lang)
 
     def test_pick_lang(self):
-        env = os.environ.pop("BTCLABELS_LANG", None)
+        env = os.environ.pop("LABELTRAIL_LANG", None)
         try:
             self.assertEqual(b.pick_lang(["find", "x"]), "en")
             self.assertEqual(b.pick_lang(["--lang", "ca", "find", "x"]), "ca")
             self.assertEqual(b.pick_lang(["find", "--lang", "es", "x"]), "es")
-            os.environ["BTCLABELS_LANG"] = "es"
+            os.environ["LABELTRAIL_LANG"] = "es"
             self.assertEqual(b.pick_lang(["find", "x"]), "es")
             self.assertEqual(b.pick_lang(["--lang", "en", "find", "x"]), "en")
         finally:
-            os.environ.pop("BTCLABELS_LANG", None)
+            os.environ.pop("LABELTRAIL_LANG", None)
             if env is not None:
-                os.environ["BTCLABELS_LANG"] = env
+                os.environ["LABELTRAIL_LANG"] = env
 
     def test_cli_messages_follow_lang(self):
         with tempfile.TemporaryDirectory() as d:
