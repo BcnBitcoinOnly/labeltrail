@@ -134,6 +134,25 @@ class TestTrace(unittest.TestCase):
         self.assertIn("&lt;external&gt;", page)
         self.assertIn("<html lang=en>", page)
 
+    def test_check_compares_export_balance(self):
+        origin = "wpkh([aaaaaaaa/84h/0h/0h])"
+        recs = [
+            {"type": "addr", "ref": ADDR_T, "origin": origin,
+             "keypath": "/0/1"},
+            {"type": "output", "ref": f"{TX_T}:0", "origin": origin,
+             "keypath": "/0/1", "value": 300000},
+            {"type": "tx", "ref": TX_T, "value": 300000},
+        ]
+        el = FakeElectrum(
+            {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "Fria-labels.jsonl",
+                  "".join(json.dumps(r) + "\n" for r in recs))
+            write(d, "electrum_vieja.json", json.dumps({TX_T: "x"}))
+            rows = dict(b.wallet_check(el, [d]))
+        self.assertEqual(rows["Fria"], (1, 1, 1, 300000, 300000))
+        self.assertIsNone(rows["electrum_vieja"])
+
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(
             "blockchain.transaction.get", [HAL]))
