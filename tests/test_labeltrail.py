@@ -40,7 +40,8 @@ class FakeElectrum:
 
     def call(self, method, params):
         if method == "blockchain.scripthash.listunspent":
-            return [{"tx_hash": r.split(":")[0], "tx_pos": int(r.split(":")[1])}
+            return [{"tx_hash": r.split(":")[0], "tx_pos": int(r.split(":")[1]),
+                     "value": 300000}
                     for r in self.unspent.get(params[0], [])]
         assert method == "blockchain.transaction.get", method
         with open(os.path.join(HERE, "fixtures", params[0] + ".hex")) as f:
@@ -194,6 +195,23 @@ class TestTrace(unittest.TestCase):
                            for a, tx in ((ADDR_T, TX_T), (ADDR_Q, TX_Q))})
         self.assertEqual(sorted(u["ref"] for u in b.find_utxos(el, recs)),
                          sorted([f"{TX_T}:0", f"{TX_Q}:0"]))
+
+    def test_find_utxos_from_electrum_address_labels(self):
+        # Electrum file: address labels only, no outputs, plus a junk key
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "vieja.json", json.dumps(
+                {ADDR_T: "Recibir desde bitcoin.de", "tre0g4sg": "x"}))
+            recs, _ = b.merge([d], quiet=True)
+        el = FakeElectrum(
+            {b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"]})
+        utxos = b.find_utxos(el, recs)
+        self.assertEqual(
+            [(u["ref"], u["label"], u["value"], u["_wallets"])
+             for u in utxos],
+            [(f"{TX_T}:0", "Recibir desde bitcoin.de", 300000, ["vieja"])])
+        tr = b.Tracer(el, recs, 15, 300, False)
+        tr.run([f"{TX_T}:0"])
+        self.assertEqual(tr.nodes[f"{TX_T}:0"]["own"], ["vieja"])
 
     def test_decode_values(self):
         ins, outs, coinbase = b.decode_tx(FakeElectrum().call(

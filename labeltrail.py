@@ -832,25 +832,34 @@ def ownership(recs):
 
 
 def find_utxos(el, recs):
-    """Live UTXOs among the exported outputs.
+    """Live UTXOs on every address the exports know about.
 
-    The address comes from the addr records with the same origin+keypath;
-    if there are none, from the transaction. Then listunspent per address.
+    Exported outputs get their address from the addr records with the same
+    origin+keypath; if there are none, from the transaction. Every addr
+    record is asked too, so coins the exports do not list (Electrum files
+    have no outputs; a stale Sparrow export) still show up, with the label
+    of their address.
     """
     # origin+keypath is not unique across wallets (watch-only wallets
     # share [00000000/...]): keep every address, ask for all of them.
-    by_path = {}
+    by_path, addr_recs = {}, {}
     for r in recs:
-        if r["type"] == "addr" and r.get("keypath"):
+        if r["type"] != "addr":
+            continue
+        try:
+            addr_script(r["ref"])
+        except (ValueError, IndexError):
+            # Electrum files also label things that are not addresses
+            continue
+        addr_recs[r["ref"]] = r
+        if r.get("keypath"):
             by_path.setdefault((r.get("origin"), r["keypath"]),
                                []).append(r["ref"])
-    outs = [r for r in recs if r["type"] == "output"]
-    addr_of, missing = {}, []
-    for r in outs:
+    outs = {r["ref"]: r for r in recs if r["type"] == "output"}
+    addrs, missing = list(addr_recs), []
+    for r in outs.values():
         a = by_path.get((r.get("origin"), r.get("keypath")))
-        if a:
-            addr_of[r["ref"]] = a
-        else:
+        if not a:
             missing.append(r["ref"])
     if missing:
         txids = list(dict.fromkeys(m.split(":")[0] for m in missing))
@@ -861,12 +870,24 @@ def find_utxos(el, recs):
             _, o, _ = decode_tx(raws[txid])
             a = script_addr(o[int(vout)][1])
             if a:
-                addr_of[m] = [a]
-    addrs = list(dict.fromkeys(a for v in addr_of.values() for a in v))
+                addrs.append(a)
+    addrs = list(dict.fromkeys(addrs))
     res = el.call_many("blockchain.scripthash.listunspent",
                        [[scripthash(addr_script(a))] for a in addrs])
-    live = {f"{u['tx_hash']}:{u['tx_pos']}" for us in res for u in us}
-    utxos = [r for r in outs if r["ref"] in live]
+    utxos = {}
+    for a, us in zip(addrs, res):
+        for u in us:
+            ref = f"{u['tx_hash']}:{u['tx_pos']}"
+            if ref in outs:
+                utxos[ref] = outs[ref]
+            elif ref not in utxos:
+                ar = addr_recs.get(a, {})
+                r = {"type": "output", "ref": ref, "value": u.get("value"),
+                     "_wallets": ar.get("_wallets") or ["?"]}
+                if ar.get("label"):
+                    r["label"] = ar["label"]
+                utxos[ref] = r
+    utxos = list(utxos.values())
     utxos.sort(key=lambda r: (r["_wallets"][0], -(r.get("value") or 0)))
     return utxos
 
