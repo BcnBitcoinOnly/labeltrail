@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """BIP-329 labels from many wallets: merge, search and UTXO origin.
 
-  btclabels.py merge [-l DIR] -o master.jsonl
-  btclabels.py find  [-l DIR] TEXT
-  btclabels.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
-  btclabels.py report [-l DIR] [-s host:port] [-o utxos.html]
+  labeltrail.py merge [-l DIR] -o master.jsonl
+  labeltrail.py find  [-l DIR] TEXT
+  labeltrail.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
+  labeltrail.py report [-l DIR] [-s host:port] [-o utxos.html]
 
 -l (repeatable) is a file or a directory; by default, the current
 directory. BIP-329 exports (.jsonl: Sparrow and others) and old Electrum
@@ -17,7 +17,7 @@ walks the inputs backwards through your outputs until it reaches external
 ones: where the coins came in. report does that for every live UTXO in
 the exports and builds an HTML page with an index and a graph per UTXO.
 
---lang en|es|ca (or $BTCLABELS_LANG) picks the language of messages and
+--lang en|es|ca (or $LABELTRAIL_LANG) picks the language of messages and
 of the report; English by default.
 Stdlib only.
 """
@@ -45,10 +45,10 @@ LANG = "en"
 DOC_ES = """\
 Labels BIP-329 de muchas billeteras: merge, búsqueda y origen de UTXOs.
 
-  btclabels.py merge [-l DIR] -o master.jsonl
-  btclabels.py find  [-l DIR] TEXTO
-  btclabels.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
-  btclabels.py report [-l DIR] [-s host:puerto] [-o utxos.html]
+  labeltrail.py merge [-l DIR] -o master.jsonl
+  labeltrail.py find  [-l DIR] TEXTO
+  labeltrail.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
+  labeltrail.py report [-l DIR] [-s host:puerto] [-o utxos.html]
 
 -l (repetible) es un archivo o un directorio; por defecto, el directorio
 actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
@@ -61,7 +61,7 @@ recorre las entradas hacia atrás por tus outputs hasta llegar a lo externo:
 por dónde entró la plata. report hace eso para todos los UTXOs vivos de los
 exports y arma un HTML con índice y un grafo por UTXO.
 
---lang en|es|ca (o $BTCLABELS_LANG) elige el idioma de los mensajes y del
+--lang en|es|ca (o $LABELTRAIL_LANG) elige el idioma de los mensajes y del
 reporte; inglés por defecto.
 Solo stdlib.
 """
@@ -69,10 +69,10 @@ Solo stdlib.
 DOC_CA = """\
 Etiquetes BIP-329 de moltes carteres: fusió, cerca i origen d'UTXOs.
 
-  btclabels.py merge [-l DIR] -o master.jsonl
-  btclabels.py find  [-l DIR] TEXT
-  btclabels.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
-  btclabels.py report [-l DIR] [-s host:port] [-o utxos.html]
+  labeltrail.py merge [-l DIR] -o master.jsonl
+  labeltrail.py find  [-l DIR] TEXT
+  labeltrail.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
+  labeltrail.py report [-l DIR] [-s host:port] [-o utxos.html]
 
 -l (repetible) és un fitxer o un directori; per defecte, el directori
 actual. S'accepten exports BIP-329 (.jsonl: Sparrow i altres) i exports
@@ -85,7 +85,7 @@ i recorre les entrades cap enrere pels teus outputs fins arribar a l'extern:
 per on van entrar els diners. report ho fa per a tots els UTXOs vius dels
 exports i genera un HTML amb índex i un graf per UTXO.
 
---lang en|es|ca (o $BTCLABELS_LANG) tria l'idioma dels missatges i de
+--lang en|es|ca (o $LABELTRAIL_LANG) tria l'idioma dels missatges i de
 l'informe; anglès per defecte.
 Només stdlib.
 """
@@ -132,12 +132,18 @@ MSG = {
         "mv_path": "PATH",
         "mv_file": "FILE",
         "h_lang": "language of messages and report: en, es, ca"
-                  " (default: $BTCLABELS_LANG or en)",
+                  " (default: $LABELTRAIL_LANG or en)",
         "h_labels": "file or directory (repeatable; default: .)",
         "h_server": "Electrum server host:port"
-                    " (default: $BTCLABELS_SERVER or 127.0.0.1:50001)",
+                    " (default: $LABELTRAIL_SERVER or 127.0.0.1:50001)",
         "h_ssl": "connect with TLS",
-        "h_insecure": "do not verify the certificate (self-signed Fulcrum)",
+        "h_insecure": "TLS without verifying the certificate; prints its SHA-256",
+        "h_fingerprint": "SHA-256 of the server certificate (self-signed"
+                         " Fulcrum); implies TLS. Default:"
+                         " $LABELTRAIL_FINGERPRINT",
+        "fp_hint": "certificate not verified; to pin it: --fingerprint {fp}",
+        "fp_mismatch": "the certificate of {server} does not match"
+                       " --fingerprint (it is {fp})",
         "h_max_depth": "maximum depth of the walk (default: 15)",
         "h_max_nodes": "per UTXO in report, total in trace (default: 300)",
         "h_all": "keep walking back through external outputs too",
@@ -188,12 +194,19 @@ MSG = {
         "mv_path": "RUTA",
         "mv_file": "ARCHIVO",
         "h_lang": "idioma de mensajes y reporte: en, es, ca"
-                  " (default: $BTCLABELS_LANG o en)",
+                  " (default: $LABELTRAIL_LANG o en)",
         "h_labels": "archivo o directorio (repetible; default: .)",
         "h_server": "servidor Electrum host:puerto"
-                    " (default: $BTCLABELS_SERVER o 127.0.0.1:50001)",
+                    " (default: $LABELTRAIL_SERVER o 127.0.0.1:50001)",
         "h_ssl": "conectar con TLS",
-        "h_insecure": "no verificar el certificado (Fulcrum autofirmado)",
+        "h_insecure": "TLS sin verificar el certificado; imprime su SHA-256",
+        "h_fingerprint": "SHA-256 del certificado del servidor (Fulcrum"
+                         " autofirmado); implica TLS. Default:"
+                         " $LABELTRAIL_FINGERPRINT",
+        "fp_hint": "certificado sin verificar; para fijarlo:"
+                   " --fingerprint {fp}",
+        "fp_mismatch": "el certificado de {server} no coincide con"
+                       " --fingerprint (es {fp})",
         "h_max_depth": "profundidad máxima del recorrido (default: 15)",
         "h_max_nodes": "por UTXO en report, total en trace (default: 300)",
         "h_all": "seguir subiendo también por lo externo",
@@ -244,12 +257,19 @@ MSG = {
         "mv_path": "RUTA",
         "mv_file": "FITXER",
         "h_lang": "idioma dels missatges i de l'informe: en, es, ca"
-                  " (per defecte: $BTCLABELS_LANG o en)",
+                  " (per defecte: $LABELTRAIL_LANG o en)",
         "h_labels": "fitxer o directori (repetible; per defecte: .)",
         "h_server": "servidor Electrum host:port"
-                    " (per defecte: $BTCLABELS_SERVER o 127.0.0.1:50001)",
+                    " (per defecte: $LABELTRAIL_SERVER o 127.0.0.1:50001)",
         "h_ssl": "connectar amb TLS",
-        "h_insecure": "no verificar el certificat (Fulcrum autosignat)",
+        "h_insecure": "TLS sense verificar el certificat; n'imprimeix el SHA-256",
+        "h_fingerprint": "SHA-256 del certificat del servidor (Fulcrum"
+                         " autosignat); implica TLS. Per defecte:"
+                         " $LABELTRAIL_FINGERPRINT",
+        "fp_hint": "certificat sense verificar; per fixar-lo:"
+                   " --fingerprint {fp}",
+        "fp_mismatch": "el certificat de {server} no coincideix amb"
+                       " --fingerprint (és {fp})",
         "h_max_depth": "profunditat màxima del recorregut (per defecte: 15)",
         "h_max_nodes": "per UTXO a report, total a trace (per defecte: 300)",
         "h_all": "continuar pujant també per l'extern",
@@ -389,18 +409,24 @@ def index(recs):
 
 
 class Electrum:
-    def __init__(self, server, use_ssl, insecure):
+    def __init__(self, server, use_ssl, insecure, fingerprint=None):
         host, port = server.rsplit(":", 1)
         s = socket.create_connection((host, int(port)), timeout=60)
-        if use_ssl:
+        if use_ssl or insecure or fingerprint:
             ctx = ssl.create_default_context()
-            if insecure:
+            if insecure or fingerprint:
                 ctx.check_hostname = False
                 ctx.verify_mode = ssl.CERT_NONE
             s = ctx.wrap_socket(s, server_hostname=host)
+            fp = hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest()
+            if fingerprint:
+                if fp != fingerprint.replace(":", "").lower():
+                    sys.exit(t("fp_mismatch", server=server, fp=fp))
+            elif insecure:
+                print(t("fp_hint", fp=fp), file=sys.stderr)
         self.f = s.makefile("rwb")
         self.i = 0
-        self.call("server.version", ["btclabels", "1.4"])
+        self.call("server.version", ["labeltrail", "1.4"])
 
     def call(self, method, params):
         self.i += 1
@@ -889,13 +915,13 @@ def write_bip329(recs, path):
 
 
 def pick_lang(argv):
-    """--lang from argv (anywhere) or $BTCLABELS_LANG; English by default.
+    """--lang from argv (anywhere) or $LABELTRAIL_LANG; English by default.
 
     Resolved before building the parser so that --help is translated too.
     """
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--lang", choices=LANGS,
-                     default=os.environ.get("BTCLABELS_LANG") or "en")
+                     default=os.environ.get("LABELTRAIL_LANG") or "en")
     a, _ = pre.parse_known_args(argv)
     return a.lang
 
@@ -922,12 +948,15 @@ def main(argv=None):
 
     def server_args(p):
         p.add_argument("-s", "--server",
-                       default=os.environ.get("BTCLABELS_SERVER",
+                       default=os.environ.get("LABELTRAIL_SERVER",
                                               "127.0.0.1:50001"),
                        help=t("h_server"))
         p.add_argument("--ssl", action="store_true", help=t("h_ssl"))
         p.add_argument("--insecure", action="store_true",
                        help=t("h_insecure"))
+        p.add_argument("--fingerprint", metavar="SHA256",
+                       default=os.environ.get("LABELTRAIL_FINGERPRINT"),
+                       help=t("h_fingerprint"))
         p.add_argument("--max-depth", type=int, default=15,
                        help=t("h_max_depth"))
         p.add_argument("--max-nodes", type=int, default=300,
@@ -974,7 +1003,7 @@ def main(argv=None):
                       f"  ({', '.join(rec['_wallets'])})")
         return
 
-    el = Electrum(a.server, a.ssl, a.insecure)
+    el = Electrum(a.server, a.ssl, a.insecure, a.fingerprint)
     tr = Tracer(el, recs, a.max_depth, a.max_nodes, a.all)
     if a.cmd == "trace":
         tr.run(a.refs)
