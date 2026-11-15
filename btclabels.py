@@ -27,8 +27,8 @@ import html
 import json
 import os
 import re
-import socket
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -715,8 +715,8 @@ class Tracer:
             return q(s)[:-1].replace("\n", "\\l") + '\\l"'
 
         lines = ["digraph utxo {", "  rankdir=LR;",
-                 '  node [shape=box, style="rounded,filled",'
-                 ' fontname="monospace", fontsize=10];']
+                 ('  node [shape=box, style="rounded,filled",'
+                  ' fontname="monospace", fontsize=10];')]
         for ref, n in self.nodes.items():
             txid, vout = ref.split(":")
             text = [f"{txid[:8]}…{txid[-4:]}:{vout}",
