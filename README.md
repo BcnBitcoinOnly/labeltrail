@@ -134,3 +134,7 @@ is the same in every language.
 
 Offline. Real transactions in `tests/fixtures/`, address vectors from BIP-173
 and BIP-350.
+
+## License
+
+GPL-3.0, see [LICENSE](LICENSE).
