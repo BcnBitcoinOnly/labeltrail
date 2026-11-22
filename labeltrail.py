@@ -5,6 +5,7 @@
   labeltrail.py find  [-l DIR] TEXT
   labeltrail.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
   labeltrail.py report [-l DIR] [-s host:port] [-o utxos.html]
+  labeltrail.py check [-l DIR] [-s host:port]
 
 -l (repeatable) is a file or a directory; by default, the current
 directory. BIP-329 exports (.jsonl: Sparrow and others) and old Electrum
@@ -16,6 +17,8 @@ UTXOs). trace queries your own Electrum server (Fulcrum, electrs) and
 walks the inputs backwards through your outputs until it reaches external
 ones: where the coins came in. report does that for every live UTXO in
 the exports and builds an HTML page with an index and a graph per UTXO.
+check compares, per wallet, the balance in the export with the live UTXOs
+found: a difference means a stale export.
 
 --lang en|es|ca (or $LABELTRAIL_LANG) picks the language of messages and
 of the report; English by default.
@@ -49,6 +52,7 @@ Labels BIP-329 de muchas billeteras: merge, búsqueda y origen de UTXOs.
   labeltrail.py find  [-l DIR] TEXTO
   labeltrail.py trace [-l DIR] [-s host:puerto] [--dot g.dot] REF...
   labeltrail.py report [-l DIR] [-s host:puerto] [-o utxos.html]
+  labeltrail.py check [-l DIR] [-s host:puerto]
 
 -l (repetible) es un archivo o un directorio; por defecto, el directorio
 actual. Se aceptan exports BIP-329 (.jsonl: Sparrow y otros) y exports
@@ -59,7 +63,9 @@ REF es txid:vout, un txid (todas sus salidas) o una dirección (sus UTXOs
 actuales). trace consulta un servidor Electrum propio (Fulcrum, electrs) y
 recorre las entradas hacia atrás por tus outputs hasta llegar a lo externo:
 por dónde entró la plata. report hace eso para todos los UTXOs vivos de los
-exports y arma un HTML con índice y un grafo por UTXO.
+exports y arma un HTML con índice y un grafo por UTXO. check compara, por
+billetera, el saldo del export con los UTXOs vivos encontrados: si difieren,
+el export está viejo.
 
 --lang en|es|ca (o $LABELTRAIL_LANG) elige el idioma de los mensajes y del
 reporte; inglés por defecto.
@@ -73,6 +79,7 @@ Etiquetes BIP-329 de moltes carteres: fusió, cerca i origen d'UTXOs.
   labeltrail.py find  [-l DIR] TEXT
   labeltrail.py trace [-l DIR] [-s host:port] [--dot g.dot] REF...
   labeltrail.py report [-l DIR] [-s host:port] [-o utxos.html]
+  labeltrail.py check [-l DIR] [-s host:port]
 
 -l (repetible) és un fitxer o un directori; per defecte, el directori
 actual. S'accepten exports BIP-329 (.jsonl: Sparrow i altres) i exports
@@ -83,7 +90,9 @@ REF és txid:vout, un txid (totes les seves sortides) o una adreça (els seus
 UTXOs actuals). trace consulta un servidor Electrum propi (Fulcrum, electrs)
 i recorre les entrades cap enrere pels teus outputs fins arribar a l'extern:
 per on van entrar els diners. report ho fa per a tots els UTXOs vius dels
-exports i genera un HTML amb índex i un graf per UTXO.
+exports i genera un HTML amb índex i un graf per UTXO. check compara, per
+cartera, el saldo de l'export amb els UTXOs vius trobats: si difereixen,
+l'export és antic.
 
 --lang en|es|ca (o $LABELTRAIL_LANG) tria l'idioma dels missatges i de
 l'informe; anglès per defecte.
@@ -104,6 +113,11 @@ MSG = {
         "bad_addr": "unsupported address: {s}",
         "no_utxos": "{ref}: no UTXOs",
         "merged": "{n} records -> {out} ({c} conflicts)",
+        "merge_readback": "warning: {out} is inside a scanned folder; later"
+                          " runs will read it back as wallet {w!r}. Write"
+                          " it somewhere else.",
+        "bad_lang": "LABELTRAIL_LANG={lang}: unsupported language"
+                    " (use en, es or ca)",
         "graph_written": "graph -> {path} ({n} nodes)",
         "live_utxos": "{n} live UTXOs in {w} wallets",
         "h_check": "per wallet: exported balance vs live UTXOs found",
@@ -175,6 +189,11 @@ MSG = {
         "bad_addr": "dirección no soportada: {s}",
         "no_utxos": "{ref}: sin UTXOs",
         "merged": "{n} registros -> {out} ({c} conflictos)",
+        "merge_readback": "aviso: {out} está dentro de una carpeta escaneada;"
+                          " las próximas corridas lo van a leer como la"
+                          " billetera {w!r}. Escribilo en otro lado.",
+        "bad_lang": "LABELTRAIL_LANG={lang}: idioma no soportado"
+                    " (usar en, es o ca)",
         "graph_written": "grafo -> {path} ({n} nodos)",
         "live_utxos": "{n} UTXOs vivos en {w} billeteras",
         "h_check": "por billetera: saldo exportado vs UTXOs vivos encontrados",
@@ -246,6 +265,11 @@ MSG = {
         "bad_addr": "adreça no suportada: {s}",
         "no_utxos": "{ref}: sense UTXOs",
         "merged": "{n} registres -> {out} ({c} conflictes)",
+        "merge_readback": "avís: {out} és dins d'una carpeta escanejada; les"
+                          " properes execucions el llegiran com la cartera"
+                          " {w!r}. Escriu-lo en un altre lloc.",
+        "bad_lang": "LABELTRAIL_LANG={lang}: idioma no suportat"
+                    " (fes servir en, es o ca)",
         "graph_written": "graf -> {path} ({n} nodes)",
         "live_utxos": "{n} UTXOs vius en {w} carteres",
         "h_check": "per cartera: saldo exportat vs UTXOs vius trobats",
@@ -381,9 +405,12 @@ def load(path):
                 r = json.loads(line)
             except json.JSONDecodeError as e:
                 sys.exit(t("bad_json", path=path, n=n, err=e))
-            if r.get("type") not in KEYS or "ref" not in r:
+            if not isinstance(r, dict) or r.get("type") not in KEYS \
+                    or "ref" not in r:
                 print(t("no_type_ref", path=path, n=n), file=sys.stderr)
                 continue
+            if r.get("label") is None:
+                r.pop("label", None)
             recs.append(r)
     w = wallet_name(path)
     # Address of each output, resolved inside this file: (origin, keypath)
@@ -414,13 +441,17 @@ def merge(paths, quiet=False, skip=()):
             if w not in cur["_wallets"]:
                 cur["_wallets"].append(w)
             a, b = cur.get("label", ""), r.get("label", "")
-            if b and b not in a.split(" / "):
+            # a label that is itself a merge ("x / y") adds only its new parts
+            have = a.split(" / ") if a else []
+            new = [x for x in dict.fromkeys(b.split(" / "))
+                   if x and x not in have]
+            if new:
                 if a:
                     conflicts += 1
                     if not quiet:
                         print(t("conflict", typ=k[0], ref=k[1], a=a, b=b),
                               file=sys.stderr)
-                cur["label"] = f"{a} / {b}" if a else b
+                cur["label"] = " / ".join(have + new)
             for f, v in r.items():
                 if f != "label" and f not in cur:
                     cur[f] = v
@@ -969,10 +1000,12 @@ def pick_lang(argv):
     Resolved before building the parser so that --help is translated too.
     """
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument("--lang", choices=LANGS,
-                     default=os.environ.get("LABELTRAIL_LANG") or "en")
+    pre.add_argument("--lang", choices=LANGS)
     a, _ = pre.parse_known_args(argv)
-    return a.lang
+    lang = a.lang or os.environ.get("LABELTRAIL_LANG") or "en"
+    if lang not in LANGS:
+        sys.exit(t("bad_lang", lang=lang))
+    return lang
 
 
 def main(argv=None):
@@ -1043,6 +1076,11 @@ def main(argv=None):
     if a.cmd == "merge":
         recs, conflicts = merge(paths, a.quiet, skip=[a.out])
         write_bip329(recs, a.out)
+        out = os.path.abspath(a.out)
+        if out.endswith((".jsonl", ".json")) and os.path.dirname(out) in {
+                os.path.abspath(p) for p in paths if os.path.isdir(p)}:
+            print(t("merge_readback", out=a.out, w=wallet_name(out)),
+                  file=sys.stderr)
         print(t("merged", n=len(recs), out=a.out, c=conflicts),
               file=sys.stderr)
         return

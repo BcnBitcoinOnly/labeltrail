@@ -106,6 +106,33 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(lines, [{"type": "tx", "ref": HAL, "label": "x"}])
 
 
+    def test_merge_output_read_back_keeps_labels(self):
+        with tempfile.TemporaryDirectory() as d:
+            for w, label in (("A", "kyc"), ("B", "p2p")):
+                write(d, f"{w}-labels.jsonl", json.dumps(
+                    {"type": "tx", "ref": HAL, "label": label}) + "\n")
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                b.main(["merge", "-q", "-l", d,
+                        "-o", os.path.join(d, "master.jsonl")])
+                recs, conflicts = b.merge([d], quiet=True)
+        self.assertIn("master", err.getvalue())
+        self.assertEqual([r["label"] for r in recs], ["kyc / p2p"])
+        self.assertEqual(conflicts, 1)
+
+    def test_null_label(self):
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "A-labels.jsonl",
+                  json.dumps({"type": "tx", "ref": HAL, "label": None})
+                  + "\n[1]\n"
+                  + json.dumps({"type": "tx", "ref": HAL, "label": "x"})
+                  + "\n")
+            out = io.StringIO()
+            with contextlib.redirect_stderr(io.StringIO()), \
+                    contextlib.redirect_stdout(out):
+                b.main(["find", "-l", d, "x"])
+        self.assertIn(f"{HAL}  x  (A)", out.getvalue())
+
+
 class TestTrace(unittest.TestCase):
     def setUp(self):
         b.set_lang("en")
@@ -216,6 +243,10 @@ class TestI18n(unittest.TestCase):
             os.environ["LABELTRAIL_LANG"] = "es"
             self.assertEqual(b.pick_lang(["find", "x"]), "es")
             self.assertEqual(b.pick_lang(["--lang", "en", "find", "x"]), "en")
+            os.environ["LABELTRAIL_LANG"] = "fr"
+            with self.assertRaises(SystemExit) as cm:
+                b.pick_lang(["find", "x"])
+            self.assertIn("LABELTRAIL_LANG=fr", cm.exception.code)
         finally:
             os.environ.pop("LABELTRAIL_LANG", None)
             if env is not None:
