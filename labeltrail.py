@@ -413,8 +413,17 @@ def load(path):
                 r.pop("label", None)
             recs.append(r)
     w = wallet_name(path)
+    # Address of each output, resolved inside this file: (origin, keypath)
+    # is only unique within one wallet. Watch-only wallets without a real
+    # fingerprint, or two wallets on the same keys, share it across files.
+    by_path = {(r.get("origin"), r.get("keypath")): r["ref"]
+               for r in recs if r["type"] == "addr" and r.get("keypath")}
     for r in recs:
         r["_wallet"] = w
+        if r["type"] == "output" and r.get("keypath"):
+            a = by_path.get((r.get("origin"), r["keypath"]))
+            if a:
+                r["_addr"] = a
     return recs
 
 
@@ -834,20 +843,14 @@ def ownership(recs):
 def find_utxos(el, recs):
     """Live UTXOs among the exported outputs.
 
-    The address comes from the addr records with the same origin+keypath;
-    if there are none, from the transaction. Then listunspent per address.
+    The address comes from the addr record with the same origin+keypath in
+    the same export file (resolved in load); if there is none, from the
+    transaction. Then listunspent per address.
     """
-    # origin+keypath is not unique across wallets (watch-only wallets
-    # share [00000000/...]): keep every address, ask for all of them.
-    by_path = {}
-    for r in recs:
-        if r["type"] == "addr" and r.get("keypath"):
-            by_path.setdefault((r.get("origin"), r["keypath"]),
-                               []).append(r["ref"])
     outs = [r for r in recs if r["type"] == "output"]
     addr_of, missing = {}, []
     for r in outs:
-        a = by_path.get((r.get("origin"), r.get("keypath")))
+        a = r.get("_addr")
         if a:
             addr_of[r["ref"]] = a
         else:
@@ -861,8 +864,8 @@ def find_utxos(el, recs):
             _, o, _ = decode_tx(raws[txid])
             a = script_addr(o[int(vout)][1])
             if a:
-                addr_of[m] = [a]
-    addrs = list(dict.fromkeys(a for v in addr_of.values() for a in v))
+                addr_of[m] = a
+    addrs = list(dict.fromkeys(addr_of.values()))
     res = el.call_many("blockchain.scripthash.listunspent",
                        [[scripthash(addr_script(a))] for a in addrs])
     live = {f"{u['tx_hash']}:{u['tx_pos']}" for us in res for u in us}

@@ -180,19 +180,31 @@ class TestTrace(unittest.TestCase):
         self.assertEqual(rows["Fria"], (1, 1, 1, 300000, 300000))
         self.assertIsNone(rows["electrum_vieja"])
 
-    def test_find_utxos_same_origin_in_two_wallets(self):
-        # two watch-only wallets share origin and keypath, not addresses
+    def test_same_origin_in_two_wallets(self):
+        # Two watch-only wallets with a placeholder fingerprint: same origin
+        # and keypath, different addresses. Both UTXOs must be found.
         origin = "wpkh([00000000/84h/0h/0h])"
-        recs = []
-        for w, addr, tx in (("A", ADDR_T, TX_T), ("B", ADDR_Q, TX_Q)):
-            recs += [
+
+        def export(addr, out):
+            return "".join(json.dumps(r) + "\n" for r in [
                 {"type": "addr", "ref": addr, "origin": origin,
-                 "keypath": "/0/0", "_wallets": [w]},
-                {"type": "output", "ref": f"{tx}:0", "origin": origin,
-                 "keypath": "/0/0", "_wallets": [w]}]
-        el = FakeElectrum({b.scripthash(b.addr_script(a)): [f"{tx}:0"]
-                           for a, tx in ((ADDR_T, TX_T), (ADDR_Q, TX_Q))})
-        self.assertEqual(sorted(u["ref"] for u in b.find_utxos(el, recs)),
+                 "keypath": "/0/0"},
+                {"type": "output", "ref": out, "origin": origin,
+                 "keypath": "/0/0", "value": 1}])
+
+        el = FakeElectrum({
+            b.scripthash(b.addr_script(ADDR_T)): [f"{TX_T}:0"],
+            b.scripthash(b.addr_script(ADDR_Q)): [f"{TX_Q}:0"]})
+        with tempfile.TemporaryDirectory() as d:
+            write(d, "A-labels.jsonl", export(ADDR_T, f"{TX_T}:0"))
+            write(d, "B-labels.jsonl", export(ADDR_Q, f"{TX_Q}:0"))
+            merged, _ = b.merge([d], quiet=True)
+            out = os.path.join(d, "m.jsonl")
+            b.write_bip329(merged, out)
+            with open(out) as f:
+                self.assertNotIn("_addr", f.read())
+        utxos = b.find_utxos(el, merged)
+        self.assertEqual(sorted(u["ref"] for u in utxos),
                          sorted([f"{TX_T}:0", f"{TX_Q}:0"]))
 
     def test_decode_values(self):
